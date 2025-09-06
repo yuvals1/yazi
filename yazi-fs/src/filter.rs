@@ -4,6 +4,7 @@ use anyhow::Result;
 use regex::bytes::{Regex, RegexBuilder};
 use yazi_shared::event::Cmd;
 
+#[derive(Clone)]
 pub struct Filter {
 	raw:   String,
 	regex: Regex,

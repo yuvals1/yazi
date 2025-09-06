@@ -86,12 +86,25 @@ impl UpdateFiles {
 
 	fn update_hovered(cx: &mut Ctx, op: FilesOp) -> Result<Data> {
 		let (id, url) = (cx.tab().id, op.cwd());
+
+		// Gather deep-filter before mutably borrowing `cx` for the folder entry.
+		let deep_filter = cx
+			.current()
+			.files
+			.filter()
+			.cloned()
+			.filter(|f| f.is_deep());
+
 		let (_, folder) = cx
 			.tab_mut()
 			.history
 			.raw_entry_mut()
 			.from_key(url)
 			.or_insert_with(|| (url.clone(), Folder::from(url)));
+
+		// Propagate active deep filter to the hovered folder (preview)
+		// so its file list respects deep-filter semantics in the preview pane.
+		folder.files.set_filter(deep_filter);
 
 		if folder.update_pub(id, op) {
 			act!(mgr:peek, cx, true)?;
