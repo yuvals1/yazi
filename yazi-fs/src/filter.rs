@@ -61,15 +61,19 @@ impl Filter {
     pub fn dir_contains_match(&self, dir: &Path) -> bool {
         // Quick non-recursive implementation for now
         // We'll improve this with proper async scanning later
-        // Use configured levels if provided; fallback to 3 (current default behavior)
-        let max_depth = self.levels.unwrap_or(3);
+        // "levels" means how many descendant levels to include:
+        // 0 = no recursion (only immediate directory entries are ignored; directory itself handled elsewhere)
+        // 1 = include children; 2 = include grandchildren; etc.
+        // Default fallback is 2 (children + grandchildren).
+        let max_depth = self.levels.unwrap_or(2);
         self.dir_contains_match_impl(dir, 0, max_depth)
     }
 
-	fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
-		if depth >= max_depth {
-			return false;
-		}
+    fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
+        // Stop if we've reached the configured descendant limit.
+        if depth >= max_depth {
+            return false;
+        }
 
 		let Ok(entries) = std::fs::read_dir(dir) else {
 			return false;
