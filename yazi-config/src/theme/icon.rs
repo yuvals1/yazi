@@ -52,20 +52,31 @@ impl Icon {
 			return Some(i);
 		}
 
-		let f = |s: &str| match s {
-			"dir" => file.is_dir(),
-			"hidden" => file.is_hidden(),
-			"link" => file.is_link(),
-			"orphan" => file.is_orphan(),
-			"dummy" => file.is_dummy(),
-			"block" => file.is_block(),
-			"char" => file.is_char(),
-			"fifo" => file.is_fifo(),
-			"sock" => file.is_sock(),
-			"exec" => file.is_exec(),
-			"sticky" => file.is_sticky(),
-			_ => false,
-		};
+        let f = |s: &str| {
+            match s {
+                "dir" => file.is_dir(),
+                "hidden" => file.is_hidden(),
+                "link" => file.is_link(),
+                "orphan" => file.is_orphan(),
+                "dummy" => file.is_dummy(),
+                "block" => file.is_block(),
+                "char" => file.is_char(),
+                "fifo" => file.is_fifo(),
+                "sock" => file.is_sock(),
+                "exec" => file.is_exec(),
+                "sticky" => file.is_sticky(),
+                _ => {
+                    // Tag condition: allow terms like "tag:Red" or "tag=red"
+                    if let Some(rest) = s.strip_prefix("tag:").or_else(|| s.strip_prefix("tag=")) {
+                        let needle = rest.trim_matches(['"', '\'']).to_ascii_lowercase();
+                        let tags = file.tags();
+                        tags.iter().any(|t| t.eq_ignore_ascii_case(&needle))
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
 		self.conds.iter().find(|(c, _)| c.eval(f) == Some(true)).map(|(_, i)| i)
 	}
 
