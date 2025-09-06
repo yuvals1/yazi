@@ -86,52 +86,38 @@ impl Filter {
     pub fn dir_contains_match(&self, dir: &Path) -> bool {
         // Quick non-recursive implementation for now
         // We'll improve this with proper async scanning later
-        // "levels" means how many descendant levels to include from the filter root.
-        // Compute remaining levels by subtracting the directory's distance from the root.
+        // "levels" means how many descendant levels to include relative to the directory being checked:
         // - 0 = no recursion; 1 = include children; 2 = include grandchildren; etc.
         // Default fallback is 2 (children + grandchildren).
-        let mut max_depth = self.levels.unwrap_or(2);
-        if let Some(root) = &self.root {
-            if let (Some(rp), Some(dp)) = (root.as_path(), Some(dir)) {
-                if let Ok(rel) = dp.strip_prefix(rp) {
-                    let distance = if rel.as_os_str().is_empty() { 0 } else { rel.components().count() };
-                    max_depth = max_depth.saturating_sub(distance);
-                }
-            }
-        }
-        if max_depth == 0 { return false }
+        let max_depth = self.levels.unwrap_or(2);
         self.dir_contains_match_impl(dir, 0, max_depth)
     }
 
     fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
-        // Stop if we've reached the configured descendant limit.
-        if depth >= max_depth {
-            return false;
-        }
-
 		let Ok(entries) = std::fs::read_dir(dir) else {
 			return false;
 		};
 
-		for entry in entries.flatten() {
-			let Ok(ft) = entry.file_type() else {
-				continue;
-			};
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
 
-			// Check the filename
-			if let Some(name) = entry.file_name().to_str() {
-				if self.matches(name) {
-					return true;
-				}
-			}
+            // Check the filename
+            if let Some(name) = entry.file_name().to_str() {
+                // A file at current iteration is at distance (depth + 1) from the original directory
+                if depth + 1 <= max_depth && self.matches(name) {
+                    return true;
+                }
+            }
 
-			// Recursively check subdirectories
-			if ft.is_dir() {
-				if self.dir_contains_match_impl(&entry.path(), depth + 1, max_depth) {
-					return true;
-				}
-			}
-		}
+            // Recursively check subdirectories up to max_depth levels
+            if ft.is_dir() && depth + 1 < max_depth {
+                if self.dir_contains_match_impl(&entry.path(), depth + 1, max_depth) {
+                    return true;
+                }
+            }
+        }
 
 		false
 	}
