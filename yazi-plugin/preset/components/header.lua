@@ -41,7 +41,11 @@ function Header:flags()
 		t[#t + 1] = string.format("search: %s", cwd.domain)
 	end
 	if filter then
-		t[#t + 1] = string.format("filter: %s", filter)
+		if filter:is_deep() then
+			t[#t + 1] = string.format("deep-filter: %s", filter)
+		else
+			t[#t + 1] = string.format("filter: %s", filter)
+		end
 	end
 	if finder then
 		t[#t + 1] = string.format("find: %s", finder)
