@@ -3737,6 +3737,7 @@ dependencies = [
  "libc",
  "objc",
  "parking_lot",
+ "plist",
  "regex",
  "scopeguard",
  "serde",

@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, fmt::Display, ops::Range, path::Path};
+use std::{cell::RefCell, collections::HashMap, ffi::OsStr, fmt::Display, ops::Range, path::{Path, PathBuf}};
 
 use anyhow::Result;
 use regex::bytes::{Regex, RegexBuilder};
@@ -268,26 +268,101 @@ fn mdls_tags(path: &Path) -> Option<Vec<String>> {
 #[cfg(not(target_os = "macos"))]
 fn mdls_tags(_path: &Path) -> Option<Vec<String>> { None }
 
-fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool {
-    let Some(existing) = mdls_tags(path) else { return false };
-    if required.is_empty() { return false }
-    if existing.is_empty() { return false }
-    let mut exist_lower: Vec<String> = existing.into_iter().map(|s| s.to_lowercase()).collect();
-    // Normalize possible suffixes like "Red\n0" by splitting at newline
-    for e in &mut exist_lower {
-        if let Some((head, _)) = e.split_once('\n') { *e = head.to_string(); }
+#[cfg(target_os = "macos")]
+fn normalize_tag_label(s: &str) -> String {
+    // Finder often stores "Label\n0"; keep label part and lowercase for case-insensitive match
+    s.split_once('\n').map(|(h, _)| h).unwrap_or(s).to_lowercase()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_xattr_tags(data: &[u8]) -> Option<Vec<String>> {
+    // xattr com.apple.metadata:_kMDItemUserTags stores a binary plist of string array
+    use std::io::Cursor;
+    let value = plist::Value::from_reader(Cursor::new(data)).ok()?;
+    let arr = value.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        if let Some(s) = v.as_string() {
+            out.push(normalize_tag_label(s));
+        }
     }
+    Some(out)
+}
+
+#[cfg(target_os = "macos")]
+fn xattr_tags(path: &Path) -> Option<Vec<String>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const ATTR: &str = "com.apple.metadata:_kMDItemUserTags";
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let c_name = CString::new(ATTR).ok()?;
+
+    // First, query size
+    let size = unsafe { libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+    if size <= 0 {
+        return Some(Vec::new()); // Treat missing as empty rather than hard failure
+    }
+    let mut buf = vec![0u8; size as usize];
+    let read = unsafe {
+        libc::getxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            buf.as_mut_ptr() as *mut _,
+            buf.len(),
+            0,
+            0,
+        )
+    };
+    if read <= 0 {
+        return Some(Vec::new());
+    }
+    buf.truncate(read as usize);
+    parse_xattr_tags(&buf).or_else(|| Some(Vec::new()))
+}
+
+thread_local! {
+    static TAGS_CACHE: RefCell<HashMap<PathBuf, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(target_os = "macos")]
+fn get_tags_cached(path: &Path) -> Option<Vec<String>> {
+    TAGS_CACHE.with(|c| {
+        if let Some(v) = c.borrow().get(path) {
+            return Some(v.clone());
+        }
+        // Try xattr first, fallback to mdls
+        let tags = xattr_tags(path).or_else(|| mdls_tags(path));
+        if let Some(mut t) = tags {
+            // xattr path already normalized; mdls path may not be — normalize here
+            if !t.is_empty() {
+                for e in &mut t { *e = normalize_tag_label(e); }
+            }
+            c.borrow_mut().insert(path.to_path_buf(), t.clone());
+            Some(t)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_tags_cached(_path: &Path) -> Option<Vec<String>> { None }
+
+fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool {
+    if required.is_empty() { return false }
+    let existing = get_tags_cached(path).unwrap_or_default();
+    if existing.is_empty() { return false }
+
     if all {
         required.iter().all(|t| {
-            let t = t.to_lowercase();
-            let key = if let Some((h, _)) = t.split_once('\n') { h.to_string() } else { t };
-            exist_lower.iter().any(|e| *e == key)
+            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
+            existing.iter().any(|e| *e == key)
         })
     } else {
         required.iter().any(|t| {
-            let t = t.to_lowercase();
-            let key = if let Some((h, _)) = t.split_once('\n') { h.to_string() } else { t };
-            exist_lower.iter().any(|e| *e == key)
+            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
+            existing.iter().any(|e| *e == key)
         })
     }
 }

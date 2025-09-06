@@ -43,6 +43,7 @@ impl Actor for Filter {
                     levels: opt.levels,
                     tags: opt.tags.clone(),
                     tag_all: opt.tag_all,
+                    combine_or: opt.combine_or,
                 });
             }
         });

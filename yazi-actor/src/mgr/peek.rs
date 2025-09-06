@@ -26,11 +26,17 @@ impl Actor for Peek {
 
 		// Ensure previewed (hovered) folder respects active deep filter
 		if hovered.is_dir() {
-			if let Some(f) = cx.current().files.filter().cloned() {
-				if f.is_deep() {
+			match cx.current().files.filter().cloned() {
+				Some(f) if f.is_deep() => {
 					if let Some(hf) = cx.hovered_folder_mut() {
 						// Apply the same deep filter (with levels/root) to the preview folder
 						hf.files.set_filter(Some(f));
+					}
+				}
+				_ => {
+					// No active deep filter: ensure preview folder has no residual filter
+					if let Some(hf) = cx.hovered_folder_mut() {
+						hf.files.set_filter(None);
 					}
 				}
 			}
