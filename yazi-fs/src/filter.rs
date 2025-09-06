@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, fmt::Display, ops::Range};
+use std::{ffi::OsStr, fmt::Display, ops::Range, path::Path};
 
 use anyhow::Result;
 use regex::bytes::{Regex, RegexBuilder};
@@ -47,6 +47,46 @@ impl Filter {
 
 	#[inline]
 	pub fn is_deep(&self) -> bool { self.deep }
+
+	/// Check if a directory contains any matching files (recursively)
+	/// Returns true if any file in the directory tree matches the filter
+	pub fn dir_contains_match(&self, dir: &Path) -> bool {
+		// Quick non-recursive implementation for now
+		// We'll improve this with proper async scanning later
+		self.dir_contains_match_impl(dir, 0, 3) // Max depth of 3 for now
+	}
+
+	fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
+		if depth >= max_depth {
+			return false;
+		}
+
+		let Ok(entries) = std::fs::read_dir(dir) else {
+			return false;
+		};
+
+		for entry in entries.flatten() {
+			let Ok(ft) = entry.file_type() else {
+				continue;
+			};
+
+			// Check the filename
+			if let Some(name) = entry.file_name().to_str() {
+				if self.matches(name) {
+					return true;
+				}
+			}
+
+			// Recursively check subdirectories
+			if ft.is_dir() {
+				if self.dir_contains_match_impl(&entry.path(), depth + 1, max_depth) {
+					return true;
+				}
+			}
+		}
+
+		false
+	}
 }
 
 impl PartialEq for Filter {

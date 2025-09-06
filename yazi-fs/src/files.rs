@@ -324,7 +324,27 @@ impl Files {
 		if let Some(filter) = &self.filter {
 			files
 				.into_iter()
-				.partition(|f| (f.is_hidden() && !self.show_hidden) || !filter.matches(f.urn()))
+				.partition(|f| {
+					// Hidden files check first
+					if f.is_hidden() && !self.show_hidden {
+						return true; // Goes to hidden
+					}
+					
+					// For deep filtering, keep directories if they contain matches
+					if filter.is_deep() && f.is_dir() {
+						// Check if the directory itself matches
+						if filter.matches(f.urn()) {
+							return false; // Keep visible
+						}
+						// Check if directory contains matching files
+						if let Some(path) = f.url.as_path() {
+							return !filter.dir_contains_match(path); // Hidden if no matches
+						}
+					}
+					
+					// Regular filter matching
+					!filter.matches(f.urn())
+				})
 		} else if self.show_hidden {
 			(vec![], files.into_iter().collect())
 		} else {
