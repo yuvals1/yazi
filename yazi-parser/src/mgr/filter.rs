@@ -7,6 +7,7 @@ pub struct FilterOpt {
 	pub query: SStr,
 	pub case:  FilterCase,
 	pub done:  bool,
+	pub deep:  bool,
 }
 
 impl TryFrom<CmdCow> for FilterOpt {
@@ -21,6 +22,7 @@ impl TryFrom<CmdCow> for FilterOpt {
 			query: c.take_first_str().unwrap_or_default(),
 			case:  FilterCase::from(&*c),
 			done:  c.bool("done"),
+			deep:  c.bool("deep"),
 		})
 	}
 }

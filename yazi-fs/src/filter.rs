@@ -7,6 +7,7 @@ use yazi_shared::event::Cmd;
 pub struct Filter {
 	raw:   String,
 	regex: Regex,
+	deep:  bool,
 }
 
 impl Filter {
@@ -19,7 +20,19 @@ impl Filter {
 			FilterCase::Sensitive => Regex::new(s)?,
 			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
 		};
-		Ok(Self { raw: s.to_owned(), regex })
+		Ok(Self { raw: s.to_owned(), regex, deep: false })
+	}
+
+	pub fn new_deep(s: &str, case: FilterCase) -> Result<Self> {
+		let regex = match case {
+			FilterCase::Smart => {
+				let uppercase = s.chars().any(|c| c.is_uppercase());
+				RegexBuilder::new(s).case_insensitive(!uppercase).build()?
+			}
+			FilterCase::Sensitive => Regex::new(s)?,
+			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
+		};
+		Ok(Self { raw: s.to_owned(), regex, deep: true })
 	}
 
 	#[inline]
@@ -31,10 +44,13 @@ impl Filter {
 	pub fn highlighted(&self, name: impl AsRef<OsStr>) -> Option<Vec<Range<usize>>> {
 		self.regex.find(name.as_ref().as_encoded_bytes()).map(|m| vec![m.range()])
 	}
+
+	#[inline]
+	pub fn is_deep(&self) -> bool { self.deep }
 }
 
 impl PartialEq for Filter {
-	fn eq(&self, other: &Self) -> bool { self.raw == other.raw }
+	fn eq(&self, other: &Self) -> bool { self.raw == other.raw && self.deep == other.deep }
 }
 
 impl Display for Filter {

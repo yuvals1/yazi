@@ -14,7 +14,13 @@ impl Actor for FilterDo {
 	const NAME: &str = "filter_do";
 
 	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		let filter = if opt.query.is_empty() { None } else { Some(Filter::new(&opt.query, opt.case)?) };
+		let filter = if opt.query.is_empty() {
+			None
+		} else if opt.deep {
+			Some(Filter::new_deep(&opt.query, opt.case)?)
+		} else {
+			Some(Filter::new(&opt.query, opt.case)?)
+		};
 
 		let hovered = cx.hovered().map(|f| f.urn().to_owned());
 		cx.current_mut().files.set_filter(filter);
