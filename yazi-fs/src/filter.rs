@@ -172,7 +172,7 @@ impl Filter {
 
             // Files at this level count if within depth budget
             if depth + 1 <= max_depth && !ft.is_dir() {
-                if has_required_tags(&entry.path(), required, all) {
+                if has_required_tags_nocache(&entry.path(), required, all) {
                     return true;
                 }
             }
@@ -180,7 +180,7 @@ impl Filter {
             // Subdirectories: recurse if within budget
             if ft.is_dir() && depth + 1 < max_depth {
                 // A tagged subdirectory also satisfies containment
-                if has_required_tags(&entry.path(), required, all) {
+                if has_required_tags_nocache(&entry.path(), required, all) {
                     return true;
                 }
                 if self.dir_contains_match_impl_tags(&entry.path(), depth + 1, max_depth, required, all) {
@@ -221,23 +221,8 @@ impl From<&Cmd> for FilterCase {
 }
 
 
-fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool {
-    if required.is_empty() { return false }
-    let existing = crate::tags::tags_for(path);
-    if existing.is_empty() { return false }
-
-    if all {
-        required.iter().all(|t| {
-            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
-            existing.iter().any(|e| *e == key)
-        })
-    } else {
-        required.iter().any(|t| {
-            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
-            existing.iter().any(|e| *e == key)
-        })
-    }
-}
+// Old cached version retained for reference; remove if not needed in future
+// fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool { ... }
 
 // Non-cached variant for immediate correctness after tag mutations.
 fn has_required_tags_nocache(path: &Path, required: &[String], all: bool) -> bool {
