@@ -19,7 +19,12 @@ impl Actor for Filter {
 	const NAME: &str = "filter";
 
 	fn act(_: &mut Ctx, opt: Self::Options) -> Result<Data> {
-        let title = if opt.deep { "Filter (deep):".to_string() } else { InputCfg::filter().title };
+        let title = if opt.deep {
+            let lv = opt.levels.unwrap_or(2);
+            format!("Filter (deep L={lv}):")
+        } else {
+            InputCfg::filter().title
+        };
         let input = InputProxy::show(InputCfg::filter().with_title(title));
 
 		tokio::spawn(async move {
