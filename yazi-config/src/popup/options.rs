@@ -91,6 +91,12 @@ impl InputCfg {
 	}
 
 	#[inline]
+	pub fn with_title(mut self, title: impl Into<String>) -> Self {
+		self.title = title.into();
+		self
+	}
+
+	#[inline]
 	pub fn with_value(mut self, value: impl Into<String>) -> Self {
 		self.value = value.into();
 		self

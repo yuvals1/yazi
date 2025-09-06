@@ -101,6 +101,7 @@ keymap = [
 
 	# Filter
 	{ on = "f", run = "filter --smart", desc = "Filter files" },
+	{ on = "F", run = "filter --smart --deep", desc = "Filter files (deep)" },
 
 	# Find
 	{ on = "/", run = "find --smart",            desc = "Find next file" },

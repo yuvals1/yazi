@@ -19,7 +19,8 @@ impl Actor for Filter {
 	const NAME: &str = "filter";
 
 	fn act(_: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		let input = InputProxy::show(InputCfg::filter());
+		let title = if opt.deep { "Filter (deep):".to_string() } else { InputCfg::filter().title };
+		let input = InputProxy::show(InputCfg::filter().with_title(title));
 
 		tokio::spawn(async move {
 			let rx = Debounce::new(UnboundedReceiverStream::new(input), Duration::from_millis(50));
