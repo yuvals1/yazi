@@ -20,16 +20,19 @@ impl Actor for Cd {
 
 	const NAME: &str = "cd";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		act!(mgr:escape_visual, cx)?;
-		if opt.interactive {
-			return Self::cd_interactive();
-		}
+    fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+        act!(mgr:escape_visual, cx)?;
+        if opt.interactive {
+            return Self::cd_interactive();
+        }
 
-		let tab = cx.tab_mut();
-		if opt.target == *tab.cwd() {
-			succ!();
-		}
+        // Carry over an active deep-filter if navigating within its root subtree
+        let prev_filter = cx.current().files.filter().cloned();
+
+        let tab = cx.tab_mut();
+        if opt.target == *tab.cwd() {
+            succ!();
+        }
 
 		// Take parent to history
 		if let Some(rep) = tab.parent.take() {
@@ -51,18 +54,36 @@ impl Actor for Cd {
 		let rep = mem::replace(&mut tab.current, rep);
 		tab.history.insert(rep.url.to_owned(), rep);
 
-		// Parent
-		if let Some(parent) = opt.target.parent() {
-			tab.parent = Some(tab.history.remove_or(parent));
-		}
+        // Parent
+        if let Some(parent) = opt.target.parent() {
+            tab.parent = Some(tab.history.remove_or(parent));
+        }
 
-		err!(Pubsub::pub_after_cd(tab.id, tab.cwd()));
-		act!(mgr:hidden, cx)?;
-		act!(mgr:sort, cx)?;
-		act!(mgr:hover, cx)?;
-		act!(mgr:refresh, cx)?;
-		succ!(render!());
-	}
+        // Apply previous deep filter to the new current folder if still under the same root
+        if let Some(f) = prev_filter {
+            if f.is_deep() {
+                let apply = match (f.root(), yazi_shared::url::UrlBuf::from(&opt.target).as_path()) {
+                    (Some(root), Some(tp)) => root.as_path().is_some_and(|rp| tp.starts_with(rp)),
+                    // If no root recorded, conservatively apply
+                    (None, _) => true,
+                    _ => false,
+                };
+                if apply {
+                    tab.current.files.set_filter(Some(f));
+                } else {
+                    // Leaving the filter root: clear any residual filter on the destination
+                    tab.current.files.set_filter(None);
+                }
+            }
+        }
+
+        err!(Pubsub::pub_after_cd(tab.id, tab.cwd()));
+        act!(mgr:hidden, cx)?;
+        act!(mgr:sort, cx)?;
+        act!(mgr:hover, cx)?;
+        act!(mgr:refresh, cx)?;
+        succ!(render!());
+    }
 }
 
 impl Cd {
