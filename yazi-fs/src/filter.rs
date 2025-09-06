@@ -86,11 +86,20 @@ impl Filter {
     pub fn dir_contains_match(&self, dir: &Path) -> bool {
         // Quick non-recursive implementation for now
         // We'll improve this with proper async scanning later
-        // "levels" means how many descendant levels to include:
-        // 0 = no recursion (only immediate directory entries are ignored; directory itself handled elsewhere)
-        // 1 = include children; 2 = include grandchildren; etc.
+        // "levels" means how many descendant levels to include from the filter root.
+        // Compute remaining levels by subtracting the directory's distance from the root.
+        // - 0 = no recursion; 1 = include children; 2 = include grandchildren; etc.
         // Default fallback is 2 (children + grandchildren).
-        let max_depth = self.levels.unwrap_or(2);
+        let mut max_depth = self.levels.unwrap_or(2);
+        if let Some(root) = &self.root {
+            if let (Some(rp), Some(dp)) = (root.as_path(), Some(dir)) {
+                if let Ok(rel) = dp.strip_prefix(rp) {
+                    let distance = if rel.as_os_str().is_empty() { 0 } else { rel.components().count() };
+                    max_depth = max_depth.saturating_sub(distance);
+                }
+            }
+        }
+        if max_depth == 0 { return false }
         self.dir_contains_match_impl(dir, 0, max_depth)
     }
 

@@ -24,6 +24,18 @@ impl Actor for Peek {
 		let mime = cx.mgr.mimetype.by_file_owned(&hovered).unwrap_or_default();
 		let folder = cx.tab().hovered_folder().map(|f| (f.offset, f.cha));
 
+		// Ensure previewed (hovered) folder respects active deep filter
+		if hovered.is_dir() {
+			if let Some(f) = cx.current().files.filter().cloned() {
+				if f.is_deep() {
+					if let Some(hf) = cx.hovered_folder_mut() {
+						// Apply the same deep filter (with levels/root) to the preview folder
+						hf.files.set_filter(Some(f));
+					}
+				}
+			}
+		}
+
 		if !cx.tab().preview.same_url(&hovered.url) {
 			cx.tab_mut().preview.skip = folder.map(|f| f.0).unwrap_or_default();
 		}
