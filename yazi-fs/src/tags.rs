@@ -90,3 +90,11 @@ pub fn tags_for(path: &Path) -> Vec<String> { tags_for_cached(path).unwrap_or_de
 #[cfg(not(target_os = "macos"))]
 pub fn tags_for(_path: &Path) -> Vec<String> { Vec::new() }
 
+// Non-cached variant for immediate UI refresh after tag mutations.
+#[cfg(target_os = "macos")]
+pub fn tags_for_nocache(path: &Path) -> Vec<String> {
+    xattr_tags(path).or_else(|| mdls_tags(path)).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn tags_for_nocache(_path: &Path) -> Vec<String> { Vec::new() }

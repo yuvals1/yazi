@@ -71,7 +71,8 @@ impl File {
     #[inline]
     pub fn tags(&self) -> Vec<String> {
         if let Some(p) = self.url.as_path() {
-            crate::tags::tags_for(p)
+            // Use non-cached read so UI reflects changes immediately
+            crate::tags::tags_for_nocache(p)
         } else {
             Vec::new()
         }
