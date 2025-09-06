@@ -1,0 +1,1 @@
+there is some weird behavior with the deep-tag plugin. if i run the deep-tag plugin once it works ok, but then i remove the tag from a file and run the deep-tag again and it still picking  that file as it still has the tag. this behavior doesnt happen with filenames - if i change the filename the deep filter stop picking it

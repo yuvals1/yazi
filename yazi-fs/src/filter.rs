@@ -79,7 +79,9 @@ impl Filter {
         match &self.matcher {
             Match::NameRegex { regex } => regex.is_match(name.as_ref().as_encoded_bytes()),
             Match::Tags { tags, all } => {
-                if let Some(p) = path { has_required_tags(p, tags, *all) } else { false }
+                // Direct entry checks should bypass cache so UI changes to tags
+                // are reflected immediately in filtering results.
+                if let Some(p) = path { has_required_tags_nocache(p, tags, *all) } else { false }
             }
         }
     }
@@ -222,6 +224,25 @@ impl From<&Cmd> for FilterCase {
 fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool {
     if required.is_empty() { return false }
     let existing = crate::tags::tags_for(path);
+    if existing.is_empty() { return false }
+
+    if all {
+        required.iter().all(|t| {
+            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
+            existing.iter().any(|e| *e == key)
+        })
+    } else {
+        required.iter().any(|t| {
+            let key = t.split_once('\n').map(|(h, _)| h).unwrap_or(t).to_lowercase();
+            existing.iter().any(|e| *e == key)
+        })
+    }
+}
+
+// Non-cached variant for immediate correctness after tag mutations.
+fn has_required_tags_nocache(path: &Path, required: &[String], all: bool) -> bool {
+    if required.is_empty() { return false }
+    let existing = crate::tags::tags_for_nocache(path);
     if existing.is_empty() { return false }
 
     if all {
