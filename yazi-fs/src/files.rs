@@ -271,7 +271,10 @@ impl Files {
 		let (mut hidden, mut items) = if let Some(filter) = &self.filter {
 			files
 				.into_iter()
-				.partition(|(_, f)| (f.is_hidden() && !self.show_hidden) || !filter.matches(f.urn()))
+				.partition(|(_, f)| {
+					(f.is_hidden() && !self.show_hidden)
+						|| !filter.matches_entry(f.urn(), f.url.as_path())
+				})
 		} else if self.show_hidden {
 			(HashMap::new(), files)
 		} else {
@@ -332,18 +335,20 @@ impl Files {
 					
 					// For deep filtering, keep directories if they contain matches
 					if filter.is_deep() && f.is_dir() {
-						// Check if the directory itself matches
-						if filter.matches(f.urn()) {
-							return false; // Keep visible
+						// Check if the directory itself matches (by name regex or tags)
+						if let Some(path) = f.url.as_path() {
+							if filter.matches_entry(f.urn(), Some(path)) {
+								return false; // Keep visible
+							}
 						}
-						// Check if directory contains matching files
+						// Check if directory contains matching files/dirs within level budget
 						if let Some(path) = f.url.as_path() {
 							return !filter.dir_contains_match(path); // Hidden if no matches
 						}
 					}
 					
-					// Regular filter matching
-					!filter.matches(f.urn())
+					// Regular filter matching (name regex or tags on the entry itself)
+					!filter.matches_entry(f.urn(), f.url.as_path())
 				})
 		} else if self.show_hidden {
 			(vec![], files.into_iter().collect())

@@ -9,6 +9,8 @@ pub struct FilterOpt {
     pub done:  bool,
     pub deep:  bool,
     pub levels: Option<usize>,
+    pub tags:   Option<SStr>,
+    pub tag_all: bool,
 }
 
 impl TryFrom<CmdCow> for FilterOpt {
@@ -24,12 +26,19 @@ impl TryFrom<CmdCow> for FilterOpt {
             .and_then(|d| d.as_usize())
             .or_else(|| c.get("levels").and_then(|d| d.as_usize()));
 
+        let tags = c
+            .try_take("tags")
+            .and_then(|d| d.into_string())
+            .or_else(|| c.take_str("tags"));
+
         Ok(Self {
             query: c.take_first_str().unwrap_or_default(),
             case:  FilterCase::from(&*c),
             done:  c.bool("done"),
             deep:  c.bool("deep"),
             levels,
+            tags,
+            tag_all: c.bool("tag-all") || c.bool("tag_all"),
         })
 	}
 }

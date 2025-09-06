@@ -14,7 +14,20 @@ impl Actor for FilterDo {
 	const NAME: &str = "filter_do";
 
 	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-        let filter = if opt.query.is_empty() {
+        let filter = if let Some(tags) = &opt.tags {
+            // Tag-mode filter: support flat and deep in Step 2
+            let tags_vec: Vec<String> = tags.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            if tags_vec.is_empty() {
+                None
+            } else if opt.deep {
+                let mut f = Filter::new_tags_deep(tags_vec, opt.tag_all);
+                if let Some(levels) = opt.levels { f = f.with_levels(levels); }
+                f = f.with_root(cx.cwd().clone());
+                Some(f)
+            } else {
+                Some(Filter::new_tags(tags_vec, opt.tag_all))
+            }
+        } else if opt.query.is_empty() {
             None
         } else {
             let mut f = if opt.deep { Filter::new_deep(&opt.query, opt.case)? } else { Filter::new(&opt.query, opt.case)? };

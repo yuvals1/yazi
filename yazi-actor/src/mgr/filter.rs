@@ -35,7 +35,15 @@ impl Actor for Filter {
 				let done = result.is_ok();
 				let (Ok(s) | Err(InputError::Typed(s))) = result else { continue };
 
-                MgrProxy::filter_do(FilterOpt { query: s.into(), case: opt.case, done, deep: opt.deep, levels: opt.levels });
+                MgrProxy::filter_do(FilterOpt {
+                    query: s.into(),
+                    case: opt.case,
+                    done,
+                    deep: opt.deep,
+                    levels: opt.levels,
+                    tags: opt.tags.clone(),
+                    tag_all: opt.tag_all,
+                });
             }
         });
         succ!();
