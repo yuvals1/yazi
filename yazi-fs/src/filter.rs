@@ -6,9 +6,10 @@ use yazi_shared::event::Cmd;
 
 #[derive(Clone)]
 pub struct Filter {
-	raw:   String,
-	regex: Regex,
-	deep:  bool,
+    raw:   String,
+    regex: Regex,
+    deep:  bool,
+    levels: Option<usize>,
 }
 
 impl Filter {
@@ -21,8 +22,8 @@ impl Filter {
 			FilterCase::Sensitive => Regex::new(s)?,
 			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
 		};
-		Ok(Self { raw: s.to_owned(), regex, deep: false })
-	}
+        Ok(Self { raw: s.to_owned(), regex, deep: false, levels: None })
+    }
 
 	pub fn new_deep(s: &str, case: FilterCase) -> Result<Self> {
 		let regex = match case {
@@ -33,8 +34,14 @@ impl Filter {
 			FilterCase::Sensitive => Regex::new(s)?,
 			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
 		};
-		Ok(Self { raw: s.to_owned(), regex, deep: true })
-	}
+        Ok(Self { raw: s.to_owned(), regex, deep: true, levels: None })
+    }
+
+    #[inline]
+    pub fn with_levels(mut self, levels: usize) -> Self {
+        self.levels = Some(levels);
+        self
+    }
 
 	#[inline]
 	pub fn matches(&self, name: impl AsRef<OsStr>) -> bool {
@@ -51,11 +58,13 @@ impl Filter {
 
 	/// Check if a directory contains any matching files (recursively)
 	/// Returns true if any file in the directory tree matches the filter
-	pub fn dir_contains_match(&self, dir: &Path) -> bool {
-		// Quick non-recursive implementation for now
-		// We'll improve this with proper async scanning later
-		self.dir_contains_match_impl(dir, 0, 3) // Max depth of 3 for now
-	}
+    pub fn dir_contains_match(&self, dir: &Path) -> bool {
+        // Quick non-recursive implementation for now
+        // We'll improve this with proper async scanning later
+        // Use configured levels if provided; fallback to 3 (current default behavior)
+        let max_depth = self.levels.unwrap_or(3);
+        self.dir_contains_match_impl(dir, 0, max_depth)
+    }
 
 	fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
 		if depth >= max_depth {
@@ -91,7 +100,9 @@ impl Filter {
 }
 
 impl PartialEq for Filter {
-	fn eq(&self, other: &Self) -> bool { self.raw == other.raw && self.deep == other.deep }
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw && self.deep == other.deep && self.levels == other.levels
+    }
 }
 
 impl Display for Filter {

@@ -19,8 +19,8 @@ impl Actor for Filter {
 	const NAME: &str = "filter";
 
 	fn act(_: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		let title = if opt.deep { "Filter (deep):".to_string() } else { InputCfg::filter().title };
-		let input = InputProxy::show(InputCfg::filter().with_title(title));
+        let title = if opt.deep { "Filter (deep):".to_string() } else { InputCfg::filter().title };
+        let input = InputProxy::show(InputCfg::filter().with_title(title));
 
 		tokio::spawn(async move {
 			let rx = Debounce::new(UnboundedReceiverStream::new(input), Duration::from_millis(50));
@@ -30,9 +30,9 @@ impl Actor for Filter {
 				let done = result.is_ok();
 				let (Ok(s) | Err(InputError::Typed(s))) = result else { continue };
 
-				MgrProxy::filter_do(FilterOpt { query: s.into(), case: opt.case, done, deep: opt.deep });
-			}
-		});
-		succ!();
-	}
+                MgrProxy::filter_do(FilterOpt { query: s.into(), case: opt.case, done, deep: opt.deep, levels: opt.levels });
+            }
+        });
+        succ!();
+    }
 }

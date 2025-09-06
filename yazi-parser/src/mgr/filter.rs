@@ -4,10 +4,11 @@ use yazi_shared::{SStr, event::CmdCow};
 
 #[derive(Debug, Default)]
 pub struct FilterOpt {
-	pub query: SStr,
-	pub case:  FilterCase,
-	pub done:  bool,
-	pub deep:  bool,
+    pub query: SStr,
+    pub case:  FilterCase,
+    pub done:  bool,
+    pub deep:  bool,
+    pub levels: Option<usize>,
 }
 
 impl TryFrom<CmdCow> for FilterOpt {
@@ -18,12 +19,13 @@ impl TryFrom<CmdCow> for FilterOpt {
 			return opt;
 		}
 
-		Ok(Self {
-			query: c.take_first_str().unwrap_or_default(),
-			case:  FilterCase::from(&*c),
-			done:  c.bool("done"),
-			deep:  c.bool("deep"),
-		})
+        Ok(Self {
+            query: c.take_first_str().unwrap_or_default(),
+            case:  FilterCase::from(&*c),
+            done:  c.bool("done"),
+            deep:  c.bool("deep"),
+            levels: c.try_take("levels").and_then(|d| d.as_usize()),
+        })
 	}
 }
 
