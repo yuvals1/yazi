@@ -351,7 +351,7 @@ fn get_tags_cached(_path: &Path) -> Option<Vec<String>> { None }
 
 fn has_required_tags(path: &Path, required: &[String], all: bool) -> bool {
     if required.is_empty() { return false }
-    let existing = get_tags_cached(path).unwrap_or_default();
+    let existing = crate::tags::tags_for(path);
     if existing.is_empty() { return false }
 
     if all {

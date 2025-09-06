@@ -66,7 +66,16 @@ impl File {
 	pub fn name(&self) -> Option<&OsStr> { self.url.name() }
 
 	#[inline]
-	pub fn stem(&self) -> Option<&OsStr> { self.url.stem() }
+    pub fn stem(&self) -> Option<&OsStr> { self.url.stem() }
+
+    #[inline]
+    pub fn tags(&self) -> Vec<String> {
+        if let Some(p) = self.url.as_path() {
+            crate::tags::tags_for(p)
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl Hash for File {

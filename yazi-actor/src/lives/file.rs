@@ -97,6 +97,10 @@ impl UserData for File {
 				THEME.filetype.iter().find(|&x| x.matches(me, mime)).map(|x| Style::from(x.style))
 			})
 		});
+		methods.add_method("tags", |lua, me, ()| {
+			let tags = me.as_ref().tags();
+			lua.create_sequence_from(tags)
+		});
 		methods.add_method("is_yanked", |lua, me, ()| {
 			lua.named_registry_value::<AnyUserData>("cx")?.borrow_scoped(|core: &yazi_core::Core| {
 				if !core.mgr.yanked.contains(&me.url) {
