@@ -19,6 +19,8 @@ impl Actor for FilterDo {
         } else {
             let mut f = if opt.deep { Filter::new_deep(&opt.query, opt.case)? } else { Filter::new(&opt.query, opt.case)? };
             if let Some(levels) = opt.levels { f = f.with_levels(levels); }
+            // Record the root directory where the filter was invoked
+            f = f.with_root(cx.cwd().clone());
             Some(f)
         };
 
@@ -29,16 +31,20 @@ impl Actor for FilterDo {
 		// When deep is disabled or query cleared, purge any preview/history folder filters
 		// to avoid stale deep-filter hiding items after exit.
 		let mut changed_preview = false;
-		if !opt.deep || filter.is_none() {
-			let mut any = false;
-			{
-				let history = &mut cx.tab_mut().history;
-				for f in history.values_mut() {
-					any |= f.files.set_filter(None);
-				}
-			}
-			changed_preview |= any;
-		}
+        if !opt.deep || filter.is_none() {
+            let mut any = false;
+            {
+                let history = &mut cx.tab_mut().history;
+                for f in history.values_mut() {
+                    any |= f.files.set_filter(None);
+                }
+            }
+            // Also clear on parent folder if it exists (e.g., the root where deep filter started)
+            if let Some(parent) = cx.parent_mut() {
+                any |= parent.files.set_filter(None);
+            }
+            changed_preview |= any;
+        }
 
 		// Ensure preview folder respects deep-filter. When deep is disabled, clear it.
 		if let Some(f) = cx.hovered_folder_mut() {

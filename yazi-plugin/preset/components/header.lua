@@ -42,9 +42,14 @@ function Header:flags()
 	end
 	if filter then
 		if filter:is_deep() then
-			-- Show configured level, or default to 2 if unspecified
+			-- Show configured level (default 2) and current distance from filter root when available
 			local lv = filter:levels() or 2
-			t[#t + 1] = string.format("deep-filter L=%d: %s", lv, filter)
+			local d = filter:distance()
+			if d then
+				t[#t + 1] = string.format("deep-filter L=%d D=%d: %s", lv, d, filter)
+			else
+				t[#t + 1] = string.format("deep-filter L=%d: %s", lv, filter)
+			end
 		else
 			t[#t + 1] = string.format("filter: %s", filter)
 		end

@@ -3,6 +3,7 @@ use std::{ffi::OsStr, fmt::Display, ops::Range, path::Path};
 use anyhow::Result;
 use regex::bytes::{Regex, RegexBuilder};
 use yazi_shared::event::Cmd;
+use yazi_shared::url::UrlBuf;
 
 #[derive(Clone)]
 pub struct Filter {
@@ -10,6 +11,7 @@ pub struct Filter {
     regex: Regex,
     deep:  bool,
     levels: Option<usize>,
+    root:   Option<UrlBuf>,
 }
 
 impl Filter {
@@ -22,7 +24,7 @@ impl Filter {
 			FilterCase::Sensitive => Regex::new(s)?,
 			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
 		};
-        Ok(Self { raw: s.to_owned(), regex, deep: false, levels: None })
+        Ok(Self { raw: s.to_owned(), regex, deep: false, levels: None, root: None })
     }
 
 	pub fn new_deep(s: &str, case: FilterCase) -> Result<Self> {
@@ -34,12 +36,18 @@ impl Filter {
 			FilterCase::Sensitive => Regex::new(s)?,
 			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
 		};
-        Ok(Self { raw: s.to_owned(), regex, deep: true, levels: None })
+        Ok(Self { raw: s.to_owned(), regex, deep: true, levels: None, root: None })
     }
 
     #[inline]
     pub fn with_levels(mut self, levels: usize) -> Self {
         self.levels = Some(levels);
+        self
+    }
+
+    #[inline]
+    pub fn with_root(mut self, root: UrlBuf) -> Self {
+        self.root = Some(root);
         self
     }
 
@@ -58,6 +66,20 @@ impl Filter {
 
     #[inline]
     pub fn levels(&self) -> Option<usize> { self.levels }
+
+    #[inline]
+    pub fn root(&self) -> Option<&UrlBuf> { self.root.as_ref() }
+
+    #[inline]
+    pub fn distance_from_root(&self, url: &UrlBuf) -> Option<usize> {
+        let root = self.root.as_ref()?;
+        let Some(root_path) = root.as_path() else { return None };
+        let Some(url_path) = url.as_path() else { return None };
+        let rel = url_path.strip_prefix(root_path).ok()?;
+        // If same directory, distance is 0
+        if rel.as_os_str().is_empty() { return Some(0) }
+        Some(rel.components().count())
+    }
 
 	/// Check if a directory contains any matching files (recursively)
 	/// Returns true if any file in the directory tree matches the filter
