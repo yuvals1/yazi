@@ -21,8 +21,9 @@ impl Filter {
 }
 
 impl UserData for Filter {
-	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-		methods.add_meta_method(MetaMethod::ToString, |_, me, ()| Ok(me.to_string()));
-		methods.add_method("is_deep", |_, me, ()| Ok(me.is_deep()));
-	}
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(MetaMethod::ToString, |_, me, ()| Ok(me.to_string()));
+        methods.add_method("is_deep", |_, me, ()| Ok(me.is_deep()));
+        methods.add_method("levels", |_, me, ()| Ok(me.levels()));
+    }
 }

@@ -42,7 +42,9 @@ function Header:flags()
 	end
 	if filter then
 		if filter:is_deep() then
-			t[#t + 1] = string.format("deep-filter: %s", filter)
+			-- Show configured level, or default to 2 if unspecified
+			local lv = filter:levels() or 2
+			t[#t + 1] = string.format("deep-filter L=%d: %s", lv, filter)
 		else
 			t[#t + 1] = string.format("filter: %s", filter)
 		end

@@ -19,12 +19,17 @@ impl TryFrom<CmdCow> for FilterOpt {
 			return opt;
 		}
 
+        let levels = c
+            .try_take("levels")
+            .and_then(|d| d.as_usize())
+            .or_else(|| c.get("levels").and_then(|d| d.as_usize()));
+
         Ok(Self {
             query: c.take_first_str().unwrap_or_default(),
             case:  FilterCase::from(&*c),
             done:  c.bool("done"),
             deep:  c.bool("deep"),
-            levels: c.try_take("levels").and_then(|d| d.as_usize()),
+            levels,
         })
 	}
 }

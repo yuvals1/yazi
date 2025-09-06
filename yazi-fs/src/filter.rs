@@ -53,8 +53,11 @@ impl Filter {
 		self.regex.find(name.as_ref().as_encoded_bytes()).map(|m| vec![m.range()])
 	}
 
-	#[inline]
-	pub fn is_deep(&self) -> bool { self.deep }
+    #[inline]
+    pub fn is_deep(&self) -> bool { self.deep }
+
+    #[inline]
+    pub fn levels(&self) -> Option<usize> { self.levels }
 
 	/// Check if a directory contains any matching files (recursively)
 	/// Returns true if any file in the directory tree matches the filter
