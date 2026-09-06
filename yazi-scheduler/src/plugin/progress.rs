@@ -1,29 +1,28 @@
 use serde::Serialize;
-use yazi_parser::app::TaskSummary;
+
+use crate::{Progress, TaskSummary};
 
 // --- Entry
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PluginProgEntry {
-	pub state: Option<bool>,
+	pub(crate) state: Option<bool>,
 }
 
 impl From<PluginProgEntry> for TaskSummary {
 	fn from(value: PluginProgEntry) -> Self {
 		Self {
 			total:   1,
-			success: (value.state == Some(true)) as u32,
-			failed:  (value.state == Some(false)) as u32,
+			success: value.success() as u32,
+			failed:  value.failed() as u32,
 			percent: value.percent().map(Into::into),
 		}
 	}
 }
 
-impl PluginProgEntry {
-	pub fn running(self) -> bool { self.state.is_none() }
+impl Progress for PluginProgEntry {
+	fn running(self) -> bool { self.state.is_none() }
 
-	pub fn success(self) -> bool { self.state == Some(true) }
+	fn cooked(self) -> bool { self.state == Some(true) }
 
-	pub fn cleaning(self) -> bool { self.success() }
-
-	pub fn percent(self) -> Option<f32> { None }
+	fn failed(self) -> bool { self.state == Some(false) }
 }

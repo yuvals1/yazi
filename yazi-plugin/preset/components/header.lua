@@ -37,8 +37,8 @@ function Header:flags()
 	local finder = self._tab.finder
 
 	local t = {}
-	if cwd.is_search then
-		t[#t + 1] = string.format("search: %s", cwd.domain)
+	if cwd.spec.is_search then
+		t[#t + 1] = string.format("search: %s", cwd.spec.domain)
 	end
 	if filter then
 		if filter:is_deep() then
@@ -61,28 +61,21 @@ function Header:flags()
 end
 
 function Header:count()
-	local yanked = #cx.yanked
+	local selected = #self._tab.selected
+	local yanked = selected > 0 and 0 or #cx.yanked
 
-	local count, style
-	if yanked == 0 then
-		count = #self._tab.selected
-		style = th.mgr.count_selected
-	elseif cx.yanked.is_cut then
-		count = yanked
-		style = th.mgr.count_cut
-	else
-		count = yanked
-		style = th.mgr.count_copied
-	end
-
-	if count == 0 then
+	local span
+	if selected > 0 then
+		span = ui.Span(" " .. selected .. " "):style(th.mgr.count_selected)
+	elseif yanked <= 0 then
 		return ""
+	elseif cx.yanked.is_cut then
+		span = ui.Span(" " .. yanked .. " "):style(th.mgr.count_cut)
+	else
+		span = ui.Span(" " .. yanked .. " "):style(th.mgr.count_copied)
 	end
 
-	return ui.Line {
-		ui.Span(string.format(" %d ", count)):style(style),
-		" ",
-	}
+	return ui.Line { span, " " }
 end
 
 function Header:reflow() return { self } end

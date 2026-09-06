@@ -1,22 +1,22 @@
 use anyhow::Result;
 use yazi_macro::{act, render, succ};
-use yazi_parser::ArrowOpt;
-use yazi_shared::event::Data;
+use yazi_parser::ArrowForm;
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct Arrow;
 
 impl Actor for Arrow {
-	type Options = ArrowOpt;
+	type Form = ArrowForm;
 
 	const NAME: &str = "arrow";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
 		let spot = &mut cx.tab_mut().spot;
 		let Some(lock) = &mut spot.lock else { succ!() };
 
-		let new = opt.step.add(spot.skip, lock.len().unwrap_or(u16::MAX as _), 0);
+		let new = form.step.add(spot.skip, lock.len().unwrap_or(u16::MAX as _), 0, 0, 0);
 		let Some(old) = lock.selected() else {
 			return act!(mgr:spot, cx, new);
 		};

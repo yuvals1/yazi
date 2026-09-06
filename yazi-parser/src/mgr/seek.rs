@@ -1,19 +1,23 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::{CmdCow, Data};
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug)]
-pub struct SeekOpt {
+#[derive(Debug, Deserialize)]
+pub struct SeekForm {
+	#[serde(alias = "0")]
 	pub units: i16,
 }
 
-impl From<CmdCow> for SeekOpt {
-	fn from(c: CmdCow) -> Self { Self { units: c.first().and_then(Data::as_i16).unwrap_or(0) } }
+impl TryFrom<ActionCow> for SeekForm {
+	type Error = anyhow::Error;
+
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for SeekOpt {
+impl FromLua for SeekForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for SeekOpt {
+impl IntoLua for SeekForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

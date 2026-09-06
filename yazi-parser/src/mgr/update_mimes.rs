@@ -1,29 +1,24 @@
-use anyhow::bail;
 use hashbrown::HashMap;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::{CmdCow, Data, DataKey};
+use serde::Deserialize;
+use yazi_shared::{event::ActionCow, url::UrlCow};
+use yazi_shim::SStr;
 
-#[derive(Debug)]
-pub struct UpdateMimesOpt {
-	pub updates: HashMap<DataKey, Data>,
+#[derive(Debug, Deserialize)]
+pub struct UpdateMimesForm {
+	pub updates: HashMap<UrlCow<'static>, SStr>,
 }
 
-impl TryFrom<CmdCow> for UpdateMimesOpt {
+impl TryFrom<ActionCow> for UpdateMimesForm {
 	type Error = anyhow::Error;
 
-	fn try_from(mut c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(updates) = c.try_take("updates").and_then(Data::into_dict) else {
-			bail!("Invalid 'updates' argument in UpdateMimesOpt");
-		};
-
-		Ok(Self { updates })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for UpdateMimesOpt {
+impl FromLua for UpdateMimesForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for UpdateMimesOpt {
+impl IntoLua for UpdateMimesForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

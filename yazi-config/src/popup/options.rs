@@ -1,28 +1,26 @@
-use ratatui::{text::{Line, Text}, widgets::{Paragraph, Wrap}};
-use yazi_shared::{IntoStringLossy, url::UrlBuf};
+use std::slice;
 
-use super::{Offset, Position};
-use crate::YAZI;
+use ratatui_core::text::{Line, Span, Text};
+use ratatui_widgets::paragraph::{Paragraph, Wrap};
+use yazi_binding::position::Position;
+use yazi_fs::file::File;
+use yazi_macro::impl_data_any;
+use yazi_shared::strand::ToStrand;
 
-#[derive(Debug, Default)]
-pub struct InputCfg {
-	pub title:      String,
-	pub value:      String,
-	pub cursor:     Option<usize>,
-	pub obscure:    bool,
-	pub position:   Position,
-	pub realtime:   bool,
-	pub completion: bool,
-}
+use crate::{THEME, YAZI};
 
-#[derive(Debug, Default)]
+// --- PickCfg
+#[derive(Clone, Debug, Default)]
 pub struct PickCfg {
 	pub title:    String,
 	pub items:    Vec<String>,
 	pub position: Position,
 }
 
-#[derive(Debug, Default)]
+impl_data_any!(PickCfg);
+
+// --- ConfirmCfg
+#[derive(Clone, Debug, Default)]
 pub struct ConfirmCfg {
 	pub position: Position,
 	pub title:    Line<'static>,
@@ -30,84 +28,7 @@ pub struct ConfirmCfg {
 	pub list:     Paragraph<'static>,
 }
 
-impl InputCfg {
-	pub fn cd() -> Self {
-		Self {
-			title: YAZI.input.cd_title.to_owned(),
-			position: Position::new(YAZI.input.cd_origin, YAZI.input.cd_offset),
-			completion: true,
-			..Default::default()
-		}
-	}
-
-	pub fn create(dir: bool) -> Self {
-		Self {
-			title: YAZI.input.create_title[dir as usize].to_owned(),
-			position: Position::new(YAZI.input.create_origin, YAZI.input.create_offset),
-			..Default::default()
-		}
-	}
-
-	pub fn rename() -> Self {
-		Self {
-			title: YAZI.input.rename_title.to_owned(),
-			position: Position::new(YAZI.input.rename_origin, YAZI.input.rename_offset),
-			..Default::default()
-		}
-	}
-
-	pub fn filter() -> Self {
-		Self {
-			title: YAZI.input.filter_title.to_owned(),
-			position: Position::new(YAZI.input.filter_origin, YAZI.input.filter_offset),
-			realtime: true,
-			..Default::default()
-		}
-	}
-
-	pub fn find(prev: bool) -> Self {
-		Self {
-			title: YAZI.input.find_title[prev as usize].to_owned(),
-			position: Position::new(YAZI.input.find_origin, YAZI.input.find_offset),
-			realtime: true,
-			..Default::default()
-		}
-	}
-
-	pub fn search(name: &str) -> Self {
-		Self {
-			title: YAZI.input.search_title.replace("{n}", name),
-			position: Position::new(YAZI.input.search_origin, YAZI.input.search_offset),
-			..Default::default()
-		}
-	}
-
-	pub fn shell(block: bool) -> Self {
-		Self {
-			title: YAZI.input.shell_title[block as usize].to_owned(),
-			position: Position::new(YAZI.input.shell_origin, YAZI.input.shell_offset),
-			..Default::default()
-		}
-	}
-
-	#[inline]
-	pub fn with_title(mut self, title: impl Into<String>) -> Self {
-		self.title = title.into();
-		self
-	}
-
-	#[inline]
-	pub fn with_value(mut self, value: impl Into<String>) -> Self {
-		self.value = value.into();
-		self
-	}
-
-	#[inline]
-	pub fn with_cursor(mut self, cursor: Option<usize>) -> Self {
-		self.cursor = cursor;
-		self
-	}
-}
+impl_data_any!(ConfirmCfg);
 
 impl ConfirmCfg {
 	fn new(
@@ -124,30 +45,30 @@ impl ConfirmCfg {
 		}
 	}
 
-	pub fn trash(urls: &[yazi_shared::url::UrlBuf]) -> Self {
+	pub fn trash(files: &[File]) -> Self {
 		Self::new(
-			Self::replace_number(&YAZI.confirm.trash_title, urls.len()),
+			Self::replace_number(&YAZI.confirm.trash_title, files.len()),
 			YAZI.confirm.trash_position(),
 			None,
-			Self::truncate_list(urls.iter(), urls.len(), 100),
+			Self::truncate_files(files, 100),
 		)
 	}
 
-	pub fn delete(urls: &[yazi_shared::url::UrlBuf]) -> Self {
+	pub fn delete(files: &[File]) -> Self {
 		Self::new(
-			Self::replace_number(&YAZI.confirm.delete_title, urls.len()),
+			Self::replace_number(&YAZI.confirm.delete_title, files.len()),
 			YAZI.confirm.delete_position(),
 			None,
-			Self::truncate_list(urls.iter(), urls.len(), 100),
+			Self::truncate_files(files, 100),
 		)
 	}
 
-	pub fn overwrite(url: &UrlBuf) -> Self {
+	pub fn overwrite(file: &File) -> Self {
 		Self::new(
-			YAZI.confirm.overwrite_title.to_owned(),
+			YAZI.confirm.overwrite_title.clone(),
 			YAZI.confirm.overwrite_position(),
 			Some(Text::raw(&YAZI.confirm.overwrite_body)),
-			Some(url.into_string_lossy().into()),
+			Self::truncate_files(slice::from_ref(file), 1),
 		)
 	}
 
@@ -156,7 +77,7 @@ impl ConfirmCfg {
 			Self::replace_number(&YAZI.confirm.quit_title, len),
 			YAZI.confirm.quit_position(),
 			Some(Text::raw(&YAZI.confirm.quit_body)),
-			Self::truncate_list(names.into_iter(), len, 10),
+			Self::truncate_lines(names, len, 10),
 		)
 	}
 
@@ -164,37 +85,37 @@ impl ConfirmCfg {
 		tpl.replace("{n}", &n.to_string()).replace("{s}", if n > 1 { "s" } else { "" })
 	}
 
-	fn truncate_list(
-		it: impl Iterator<Item = impl IntoStringLossy>,
-		len: usize,
-		max: usize,
-	) -> Option<Text<'static>> {
+	fn truncate_lines<I>(it: I, len: usize, max: usize) -> Option<Text<'static>>
+	where
+		I: IntoIterator,
+		I::Item: ToStrand,
+	{
 		let mut lines = Vec::with_capacity(len.min(max + 1));
-		for (i, s) in it.enumerate() {
+		for (i, s) in it.into_iter().enumerate() {
 			if i >= max {
 				lines.push(format!("... and {} more", len - max));
 				break;
 			}
-			lines.push(s.into_string_lossy());
+			lines.push(s.to_strand().into_string_lossy());
 		}
 		Some(Text::from_iter(lines))
 	}
-}
 
-impl PickCfg {
-	fn max_height(len: usize) -> u16 {
-		YAZI.pick.open_offset.height.min(YAZI.pick.border().saturating_add(len as u16))
-	}
+	fn truncate_files(files: &[File], max: usize) -> Option<Text<'static>> {
+		let mut lines = Vec::with_capacity(files.len().min(max + 1));
+		for (i, f) in files.iter().enumerate() {
+			if i >= max {
+				lines.push(Line::raw(format!("... and {} more", files.len() - max)));
+				break;
+			}
 
-	pub fn open(items: Vec<String>) -> Self {
-		let max_height = Self::max_height(items.len());
-		Self {
-			title: YAZI.pick.open_title.to_owned(),
-			items,
-			position: Position::new(YAZI.pick.open_origin, Offset {
-				height: max_height,
-				..YAZI.pick.open_offset
-			}),
+			lines.push(Line::default());
+			if let Some(icon) = THEME.icon.matches(f, false) {
+				lines[i].push_span(Span::styled(icon.text, icon.style));
+				lines[i].push_span(" ");
+			}
+			lines[i].push_span(f.url.to_strand().into_string_lossy());
 		}
+		Some(lines.into())
 	}
 }

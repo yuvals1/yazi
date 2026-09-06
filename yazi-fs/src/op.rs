@@ -1,35 +1,37 @@
 use std::path::Path;
 
 use hashbrown::{HashMap, HashSet};
-use yazi_macro::relay;
-use yazi_shared::{Id, Ids, url::{UrlBuf, UrnBuf}};
+use mlua::{UserData, UserDataFields};
+use yazi_codegen::FromLuaOwned;
+use yazi_macro::{impl_data_any, relay};
+use yazi_shared::{id::{Id, Ids}, path::{PathBufDyn, PathLike}, url::{UrlBuf, UrlLike, UrlMapExt}};
 
-use super::File;
-use crate::{cha::Cha, maybe_exists};
+use crate::file::File;
 
 pub static FILES_TICKET: Ids = Ids::new();
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, FromLuaOwned)]
 pub enum FilesOp {
-	Full(UrlBuf, Vec<File>, Cha),
+	Full(File, Vec<File>),
 	Part(UrlBuf, Vec<File>, Id),
-	Done(UrlBuf, Cha, Id),
-	Size(UrlBuf, HashMap<UrnBuf, u64>),
-	IOErr(UrlBuf, std::io::ErrorKind),
+	Done(File, Id),
+	Size(UrlBuf, HashMap<PathBufDyn, u64>),
+	IOErr(UrlBuf, yazi_shim::fs::Error),
 
 	Creating(UrlBuf, Vec<File>),
-	Deleting(UrlBuf, HashSet<UrnBuf>),
-	Updating(UrlBuf, HashMap<UrnBuf, File>),
-	Upserting(UrlBuf, HashMap<UrnBuf, File>),
+	Deleting(UrlBuf, HashSet<PathBufDyn>),
+	Updating(UrlBuf, HashMap<PathBufDyn, File>),
+	Upserting(UrlBuf, HashMap<PathBufDyn, File>),
 }
 
+impl_data_any!(FilesOp, from_into_lua = inherit);
+
 impl FilesOp {
-	#[inline]
 	pub fn cwd(&self) -> &UrlBuf {
 		match self {
-			Self::Full(u, ..) => u,
+			Self::Full(f, ..) => &f.url,
 			Self::Part(u, ..) => u,
-			Self::Done(u, ..) => u,
+			Self::Done(f, ..) => &f.url,
 			Self::Size(u, _) => u,
 			Self::IOErr(u, _) => u,
 
@@ -40,7 +42,6 @@ impl FilesOp {
 		}
 	}
 
-	#[inline]
 	pub fn emit(self) {
 		yazi_shared::event::Event::Call(relay!(mgr:update_files).with_any("op", self).into()).emit();
 	}
@@ -51,46 +52,66 @@ impl FilesOp {
 		ticket
 	}
 
-	pub fn rename(map: HashMap<UrlBuf, File>) {
-		let mut parents: HashMap<_, (HashSet<_>, HashMap<_, _>)> = Default::default();
-		for (o, n) in map {
-			let Some(o_p) = o.parent() else { continue };
-			let Some(n_p) = n.url.parent() else { continue };
-			if o_p != n_p {
-				parents.entry_ref(&o_p).or_default().0.insert(o.urn().to_owned());
+	pub fn create(files: Vec<File>) {
+		let mut trails: HashMap<UrlBuf, Vec<_>> = Default::default();
+		for file in files {
+			if let Some((t, _)) = file.url.pair() {
+				trails.get_or_insert_default(t).push(file);
 			}
-			parents.entry_ref(&n_p).or_default().1.insert(n.urn().to_owned(), n);
 		}
-		for (p, (o, n)) in parents {
+		for (t, files) in trails {
+			Self::Creating(t, files).emit();
+		}
+	}
+
+	pub fn rename(map: HashMap<UrlBuf, File>) {
+		let mut trails: HashMap<UrlBuf, (HashSet<_>, HashMap<_, _>)> = Default::default();
+		for (o, n) in map {
+			let Some((o_t, o_k)) = o.pair() else { continue };
+			let Some((n_t, n_k)) = n.url.pair() else { continue };
+			if o_t == n_t {
+				trails.get_or_insert_default(o_t).1.insert(o_k.into(), n);
+			} else {
+				trails.get_or_insert_default(o_t).0.insert(o_k.into());
+				trails.get_or_insert_default(n_t).1.insert(n_k.into(), n);
+			}
+		}
+		for (t, (o, n)) in trails {
 			match (o.is_empty(), n.is_empty()) {
-				(true, true) => unreachable!(),
-				(true, false) => Self::Upserting(p, n).emit(),
-				(false, true) => Self::Deleting(p, o).emit(),
+				(true, true) => {}
+				(true, false) => Self::Upserting(t, n).emit(),
+				(false, true) => Self::Deleting(t, o).emit(),
 				(false, false) => {
-					Self::Deleting(p.clone(), o).emit();
-					Self::Upserting(p, n).emit();
+					Self::Deleting(t.clone(), o).emit();
+					Self::Upserting(t, n).emit();
 				}
 			}
 		}
 	}
 
 	pub fn mutate(ops: Vec<Self>) {
-		let mut parents: HashMap<_, (HashMap<_, _>, HashSet<_>)> = Default::default();
+		let mut trails: HashMap<_, (HashMap<_, _>, HashSet<_>)> = Default::default();
 		for op in ops {
 			match op {
-				Self::Upserting(p, map) => parents.entry(p).or_default().0.extend(map),
-				Self::Deleting(p, urns) => parents.entry(p).or_default().1.extend(urns),
+				Self::Upserting(t, map) => trails
+					.entry(t)
+					.or_default()
+					.0
+					.extend(map.into_iter().filter(|(k, f)| !k.is_empty() && !f.key().is_empty())),
+				Self::Deleting(t, keys) => {
+					trails.entry(t).or_default().1.extend(keys.into_iter().filter(|k| !k.is_empty()))
+				}
 				_ => unreachable!(),
 			}
 		}
-		for (p, (u, d)) in parents {
+		for (t, (u, d)) in trails {
 			match (u.is_empty(), d.is_empty()) {
-				(true, true) => unreachable!(),
-				(true, false) => Self::Deleting(p, d).emit(),
-				(false, true) => Self::Upserting(p, u).emit(),
+				(true, true) => {}
+				(true, false) => Self::Deleting(t, d).emit(),
+				(false, true) => Self::Upserting(t, u).emit(),
 				(false, false) => {
-					Self::Deleting(p.clone(), d).emit();
-					Self::Upserting(p, u).emit();
+					Self::Deleting(t.clone(), d).emit();
+					Self::Upserting(t, u).emit();
 				}
 			}
 		}
@@ -101,16 +122,16 @@ impl FilesOp {
 			($files:expr) => {{ $files.iter().map(|file| file.chdir(wd)).collect() }};
 		}
 		macro_rules! map {
-			($map:expr) => {{ $map.iter().map(|(urn, file)| (urn.clone(), file.chdir(wd))).collect() }};
+			($map:expr) => {{ $map.iter().map(|(key, file)| (key.clone(), file.chdir(wd))).collect() }};
 		}
 
 		let w = UrlBuf::from(wd);
 		match self {
-			Self::Full(_, files, cha) => Self::Full(w, files!(files), *cha),
+			Self::Full(file, files) => Self::Full(file.chdir(wd), files!(files)),
 			Self::Part(_, files, ticket) => Self::Part(w, files!(files), *ticket),
-			Self::Done(_, cha, ticket) => Self::Done(w, *cha, *ticket),
-			Self::Size(_, map) => Self::Size(w, map.iter().map(|(urn, &s)| (urn.clone(), s)).collect()),
-			Self::IOErr(_, err) => Self::IOErr(w, *err),
+			Self::Done(file, ticket) => Self::Done(file.chdir(wd), *ticket),
+			Self::Size(_, map) => Self::Size(w, map.iter().map(|(key, &s)| (key.clone(), s)).collect()),
+			Self::IOErr(_, err) => Self::IOErr(w, err.clone()),
 
 			Self::Creating(_, files) => Self::Creating(w, files!(files)),
 			Self::Deleting(_, urns) => Self::Deleting(w, urns.clone()),
@@ -118,29 +139,10 @@ impl FilesOp {
 			Self::Upserting(_, map) => Self::Upserting(w, map!(map)),
 		}
 	}
+}
 
-	pub async fn issue_error(cwd: &UrlBuf, kind: std::io::ErrorKind) {
-		use std::io::ErrorKind;
-		if kind != ErrorKind::NotFound {
-			Self::IOErr(cwd.clone(), kind).emit();
-		} else if maybe_exists(cwd).await {
-			Self::IOErr(cwd.clone(), kind).emit();
-		} else if let Some((p, n)) = cwd.pair() {
-			Self::Deleting(p.into(), [n.into()].into()).emit();
-		}
-	}
-
-	pub fn diff_recoverable(&self, contains: impl Fn(&UrlBuf) -> bool) -> (Vec<UrlBuf>, Vec<UrlBuf>) {
-		match self {
-			Self::Deleting(cwd, urns) => (urns.iter().map(|u| cwd.join(u)).collect(), vec![]),
-			Self::Updating(cwd, urns) | Self::Upserting(cwd, urns) => urns
-				.iter()
-				.filter(|&(u, f)| u != f.urn())
-				.map(|(u, f)| (cwd.join(u), f))
-				.filter(|(u, _)| contains(u))
-				.map(|(u, f)| (u, f.url_owned()))
-				.unzip(),
-			_ => (vec![], vec![]),
-		}
+impl UserData for FilesOp {
+	fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+		fields.add_field_method_get("cwd", |_, me| Ok(me.cwd().clone()));
 	}
 }

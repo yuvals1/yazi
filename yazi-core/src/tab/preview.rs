@@ -1,97 +1,82 @@
-use std::time::Duration;
-
-use tokio::{pin, task::JoinHandle};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
-use tokio_util::sync::CancellationToken;
+use tokio::task::JoinHandle;
 use yazi_adapter::ADAPTOR;
-use yazi_config::{LAYOUT, YAZI};
-use yazi_fs::{File, Files, FilesOp, cha::Cha};
+use yazi_binding::Scope;
+use yazi_config::YAZI;
+use yazi_fs::{FsHash64, file::File};
 use yazi_macro::render;
-use yazi_parser::mgr::PreviewLock;
-use yazi_plugin::{external::Highlighter, isolate};
-use yazi_shared::{MIME_DIR, pool::{InternStr, Symbol}, url::UrlBuf};
+use yazi_runner::{RUNNER, previewer::{PeekError, PeekJob}};
+use yazi_shared::{id::Id, pool::Symbol, url::UrlBuf};
+
+use crate::{AppProxy, Highlighter, MgrProxy, tab::{PreviewLock, PreviewSig}};
 
 #[derive(Default)]
 pub struct Preview {
-	pub lock: Option<PreviewLock>,
-	pub skip: usize,
+	pub lock:        Option<PreviewLock>,
+	pub skip:        usize,
+	pub folder_lock: Option<UrlBuf>,
 
-	previewer_ct:  Option<CancellationToken>,
-	folder_loader: Option<JoinHandle<()>>,
+	handle: Option<JoinHandle<()>>,
+	scope:  Scope,
 }
 
 impl Preview {
 	pub fn go(&mut self, file: File, mime: Symbol<str>, force: bool) {
 		if mime.is_empty() {
 			return; // Wait till mimetype is resolved to avoid flickering
-		} else if !force && self.same_lock(&file, &mime) {
+		}
+
+		let sig = PreviewSig::new(&file, &mime).hash_id();
+		if !force && self.same_lock(sig) {
 			return;
 		}
 
-		let Some(previewer) = YAZI.plugin.previewer(&file.url, &mime) else {
+		let Some(previewer) = YAZI.plugin.previewers.matches(&file, &mime) else {
 			return self.reset();
 		};
 
 		self.abort();
-		self.previewer_ct = isolate::peek(&previewer.run, file, mime, self.skip);
-	}
+		self.scope = Scope::new();
 
-	pub fn go_folder(&mut self, file: File, dir: Option<Cha>, force: bool) {
-		let same = self.same_file(&file, MIME_DIR);
-		let (wd, cha, internal) = (file.url_owned(), file.cha, file.url.is_internal());
+		let job = PeekJob { previewer, file, mime, sig, skip: self.skip };
+		let scope = self.scope.clone();
 
-		self.go(file, MIME_DIR.intern(), force);
-		if same || !internal {
-			return;
-		}
-
-		self.lock =
-			Some(PreviewLock { url: wd.clone(), cha, mime: MIME_DIR.to_owned(), ..Default::default() });
-		self.folder_loader.take().map(|h| h.abort());
-		self.folder_loader = Some(tokio::spawn(async move {
-			let Some(new) = Files::assert_stale(&wd, dir.unwrap_or_default()).await else { return };
-
-			let rx = match Files::from_dir(&wd).await {
-				Ok(rx) => rx,
-				Err(e) => return FilesOp::issue_error(&wd, e.kind()).await,
-			};
-
-			let stream =
-				UnboundedReceiverStream::new(rx).chunks_timeout(50000, Duration::from_millis(500));
-			pin!(stream);
-
-			let ticket = FilesOp::prepare(&wd);
-			while let Some(chunk) = stream.next().await {
-				FilesOp::Part(wd.clone(), chunk, ticket).emit();
+		self.handle = Some(tokio::spawn(async move {
+			let mut rx = RUNNER.peek(&job).await;
+			match rx.recv().await.unwrap_or(Err(PeekError::Cancelled)) {
+				Ok(()) | Err(PeekError::Cancelled) => {}
+				Err(PeekError::ShouldSync) => AppProxy::plugin_peek(job, scope),
+				Err(e) => MgrProxy::update_peeked_error(job, e.to_string(), scope),
 			}
-			FilesOp::Done(wd, new, ticket).emit();
 		}));
 	}
 
-	pub fn abort(&mut self) {
-		self.previewer_ct.take().map(|ct| ct.cancel());
+	fn abort(&mut self) {
+		self.handle.take().map(|ct| ct.abort());
+		self.scope.take().cancel();
 		Highlighter::abort();
 	}
 
 	pub fn reset(&mut self) {
 		self.abort();
-		ADAPTOR.get().image_hide().ok();
+		ADAPTOR.image_hide().ok();
 		render!(self.lock.take().is_some())
 	}
 
 	pub fn reset_image(&mut self) {
 		self.abort();
-		ADAPTOR.get().image_hide().ok();
+		ADAPTOR.image_hide().ok();
 	}
 
 	pub fn same_url(&self, url: &UrlBuf) -> bool { matches!(&self.lock, Some(l) if l.url == *url) }
 
+	pub fn same_folder(&self, url: &UrlBuf) -> bool { self.folder_lock.as_ref() == Some(url) }
+
 	pub fn same_file(&self, file: &File, mime: &str) -> bool {
 		self.same_url(&file.url)
-			&& matches!(&self.lock , Some(l) if l.cha.hits(file.cha) && l.mime == mime && *l.area == LAYOUT.get().preview)
+			&& matches!(&self.lock, Some(l) if l.sig == PreviewSig::new(file, mime).hash_id())
 	}
 
-	pub fn same_lock(&self, file: &File, mime: &str) -> bool {
-		self.same_file(file, mime) && matches!(&self.lock, Some(l) if l.skip == self.skip)
+	fn same_lock(&self, sig: Id) -> bool {
+		self.lock.as_ref().is_some_and(|l| l.sig == sig && l.skip == self.skip)
 	}
 }

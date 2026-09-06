@@ -3,37 +3,38 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::pin;
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
-use yazi_config::popup::InputCfg;
-use yazi_macro::succ;
-use yazi_parser::mgr::FilterOpt;
-use yazi_proxy::{InputProxy, MgrProxy};
-use yazi_shared::{Debounce, errors::InputError, event::Data};
+use yazi_config::YAZI;
+use yazi_core::mgr::FilterOpt;
+use yazi_macro::{input, succ};
+use yazi_parser::mgr::FilterForm;
+use yazi_proxy::MgrProxy;
+use yazi_shared::{Debounce, data::Data};
+use yazi_widgets::input::InputEvent;
 
 use crate::{Actor, Ctx};
 
 pub struct Filter;
 
 impl Actor for Filter {
-	type Options = FilterOpt;
+	type Form = FilterForm;
 
 	const NAME: &str = "filter";
 
-	fn act(_: &mut Ctx, opt: Self::Options) -> Result<Data> {
-        let title = if opt.deep {
-            let lv = opt.levels.unwrap_or(2);
-            format!("Filter (deep L={lv}):")
-        } else {
-            InputCfg::filter().title
-        };
-        let input = InputProxy::show(InputCfg::filter().with_title(title));
+	fn act(cx: &mut Ctx, Self::Form { opt }: Self::Form) -> Result<Data> {
+		let mut input_opt = YAZI.input.filter();
+		if opt.deep {
+			let lv = opt.levels.unwrap_or(2);
+			input_opt.title = format!("Filter (deep L={lv}):");
+		}
+		let input = input!(cx, input_opt)?;
 
 		tokio::spawn(async move {
 			let rx = Debounce::new(UnboundedReceiverStream::new(input), Duration::from_millis(50));
 			pin!(rx);
 
-			while let Some(result) = rx.next().await {
-				let done = result.is_ok();
-				let (Ok(s) | Err(InputError::Typed(s))) = result else { continue };
+			while let Some(event) = rx.next().await {
+				let done = event.is_submit();
+				let (InputEvent::Submit(s) | InputEvent::Type(s)) = event else { continue };
 
                 MgrProxy::filter_do(FilterOpt {
                     query: s.into(),

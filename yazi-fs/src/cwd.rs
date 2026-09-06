@@ -1,7 +1,10 @@
-use std::{env::{current_dir, set_current_dir}, ops::Deref, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{borrow::Cow, env::{current_dir, set_current_dir}, ops::Deref, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 use arc_swap::ArcSwap;
-use yazi_shared::{RoCell, url::UrlBuf};
+use yazi_shared::url::{AsUrl, Url, UrlBuf, UrlLike};
+use yazi_shim::cell::RoCell;
+
+use crate::{FsUrl, Xdg, path::clean_url};
 
 pub static CWD: RoCell<Cwd> = RoCell::new();
 
@@ -15,50 +18,99 @@ impl Deref for Cwd {
 
 impl Default for Cwd {
 	fn default() -> Self {
-		let p = std::env::var_os("PWD")
+		let u = std::env::var_os("PWD")
 			.map(PathBuf::from)
 			.filter(|p| p.is_absolute())
-			.or_else(|| current_dir().ok())
+			.map(clean_url)
+			.or_else(|| current_dir().ok().map(UrlBuf::from))
 			.expect("failed to get current working directory");
 
-		Self(ArcSwap::new(Arc::new(UrlBuf::from(p))))
+		Self(ArcSwap::new(Arc::new(u)))
 	}
 }
 
 impl Cwd {
-	pub fn set(&self, url: &UrlBuf) -> bool {
-		if self.load().as_ref() == url {
+	pub(crate) fn path(&self) -> PathBuf { self.0.load().as_url().working_path().into_owned() }
+
+	pub fn set(&self, url: &UrlBuf, callback: fn()) -> bool {
+		if !url.is_absolute() {
+			return false;
+		} else if self.0.load().as_ref() == url {
 			return false;
 		}
 
-		self.store(Arc::new(url.clone()));
-		if let Some(p) = url.as_path() {
-			unsafe { std::env::set_var("PWD", p) };
-			Self::sync_cwd();
-		}
+		self.0.store(Arc::new(url.clone()));
+		Self::sync_cwd(callback);
 
 		true
 	}
 
-	fn sync_cwd() {
+	pub fn ensure(url: Url) -> Cow<Path> {
+		use std::{io::ErrorKind::{AlreadyExists, NotADirectory, NotFound}, path::Component as C};
+
+		let Some(cache) = url.cache_bucket() else {
+			return url.working_path();
+		};
+
+		if !matches!(std::fs::create_dir_all(&cache), Err(e) if e.kind() == NotADirectory || e.kind() == AlreadyExists)
+		{
+			return cache.into();
+		}
+
+		let latter = cache.strip_prefix(Xdg::temp_dir()).expect("under temp dir");
+		let mut it = latter.components().peekable();
+		while it.peek() == Some(&C::CurDir) {
+			it.next().unwrap();
+		}
+
+		let mut count = 0;
+		for c in it {
+			match c {
+				C::Prefix(_) | C::RootDir | C::ParentDir => return cache.into(),
+				C::CurDir | C::Normal(_) => count += 1,
+			}
+		}
+
+		for n in (0..count).rev() {
+			let mut it = cache.components();
+			for _ in 0..n {
+				it.next_back().unwrap();
+			}
+			match std::fs::remove_file(it.as_path()) {
+				Ok(_) => break,
+				Err(e) if e.kind() == NotFound => break,
+				Err(_) => {}
+			}
+		}
+
+		std::fs::create_dir_all(&cache).ok();
+		cache.into()
+	}
+
+	fn sync_cwd(callback: fn()) {
 		static SYNCING: AtomicBool = AtomicBool::new(false);
 		if SYNCING.swap(true, Ordering::Relaxed) {
 			return;
 		}
 
 		tokio::task::spawn_blocking(move || {
-			if let Some(p) = CWD.load().as_path() {
-				_ = set_current_dir(p);
-			}
+			let cwd = CWD.load();
+			let path = Self::ensure(cwd.as_url());
 
+			set_current_dir(&path).ok();
 			let cur = current_dir().unwrap_or_default();
+
+			unsafe { std::env::set_var("PWD", path.as_ref()) }
 			SYNCING.store(false, Ordering::Relaxed);
 
-			if let Some(p) = CWD.load().as_path()
-				&& cur != p
-			{
-				set_current_dir(p).ok();
+			let cwd = CWD.load();
+			let path = Self::ensure(cwd.as_url());
+			if cur != path {
+				set_current_dir(&path).ok();
+				unsafe { std::env::set_var("PWD", path.as_ref()) }
 			}
+
+			callback();
 		});
 	}
 }

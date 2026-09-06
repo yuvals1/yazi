@@ -3,20 +3,21 @@ use std::{ffi::{CStr, CString, OsString, c_void}, mem, os::unix::{ffi::OsStringE
 use anyhow::{Result, bail};
 use core_foundation_sys::{array::CFArrayRef, base::{CFRelease, kCFAllocatorDefault}, runloop::{CFRunLoopGetCurrent, CFRunLoopRun, kCFRunLoopDefaultMode}};
 use libc::{c_char, mach_port_t};
-use objc::{msg_send, runtime::Object, sel, sel_impl};
+use objc2::{msg_send, runtime::AnyObject};
 use scopeguard::defer;
-use tracing::error;
 use yazi_ffi::{CFDict, CFString, DADiskCopyDescription, DADiskCreateFromBSDName, DARegisterDiskAppearedCallback, DARegisterDiskDescriptionChangedCallback, DARegisterDiskDisappearedCallback, DASessionCreate, DASessionScheduleWithRunLoop, IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IOServiceGetMatchingServices, IOServiceMatching};
+use yazi_macro::error;
 use yazi_shared::natsort;
 
 use super::{Locked, Partition, Partitions};
 
 impl Partitions {
-	pub fn monitor<F>(me: Locked, cb: F)
+	pub fn monitor<F>(me: &'static Locked, cb: F)
 	where
 		F: Fn() + Copy + Send + 'static,
 	{
-		tokio::task::spawn_blocking(move || {
+		let rt = tokio::runtime::Handle::current();
+		std::thread::spawn(move || {
 			let session = unsafe { DASessionCreate(kCFAllocatorDefault) };
 			if session.is_null() {
 				return error!("Cannot create a disk arbitration session");
@@ -39,12 +40,12 @@ impl Partitions {
 			}
 
 			let create_context = || {
-				let me = me.clone();
+				let rt = rt.clone();
 				let boxed: Box<dyn Fn()> = Box::new(move || {
 					if mem::replace(&mut me.write().need_update, true) {
 						return;
 					}
-					Self::update(me.clone(), cb);
+					Self::update(me, cb, &rt);
 				});
 				Box::into_raw(Box::new(boxed)) as *mut c_void
 			};
@@ -70,8 +71,11 @@ impl Partitions {
 		});
 	}
 
-	fn update(me: Locked, cb: impl Fn() + Send + 'static) {
-		_ = tokio::task::spawn_blocking(move || {
+	fn update<F>(me: &'static Locked, cb: F, rt: &tokio::runtime::Handle)
+	where
+		F: Fn() + Send + 'static,
+	{
+		_ = rt.spawn_blocking(move || {
 			let result = Self::all_names().and_then(Self::all_partitions);
 			if let Err(ref e) = result {
 				error!("Error encountered while updating mount points: {e:?}");
@@ -162,7 +166,7 @@ impl Partitions {
 		defer! { unsafe { CFRelease(property) } };
 
 		#[allow(unexpected_cfgs)]
-		let cstr: *const c_char = unsafe { msg_send![property as *const Object, UTF8String] };
+		let cstr: *const c_char = unsafe { msg_send![property as *const AnyObject, UTF8String] };
 		Ok(if cstr.is_null() {
 			bail!("Invalid value for the name property");
 		} else {

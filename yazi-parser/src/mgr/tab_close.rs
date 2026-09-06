@@ -1,23 +1,27 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::{CmdCow, Data};
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug)]
-pub struct TabCloseOpt {
+#[derive(Debug, Deserialize)]
+pub struct TabCloseForm {
+	#[serde(alias = "0", default)]
 	pub idx: usize,
 }
 
-impl From<CmdCow> for TabCloseOpt {
-	fn from(c: CmdCow) -> Self { Self { idx: c.first().and_then(Data::as_usize).unwrap_or(0) } }
+impl TryFrom<ActionCow> for TabCloseForm {
+	type Error = anyhow::Error;
+
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl From<usize> for TabCloseOpt {
+impl From<usize> for TabCloseForm {
 	fn from(idx: usize) -> Self { Self { idx } }
 }
 
-impl FromLua for TabCloseOpt {
+impl FromLua for TabCloseForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for TabCloseOpt {
+impl IntoLua for TabCloseForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

@@ -1,25 +1,25 @@
 use anyhow::Result;
 use yazi_macro::{render, succ};
-use yazi_parser::ArrowOpt;
-use yazi_shared::event::Data;
+use yazi_parser::ArrowForm;
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct Arrow;
 
 impl Actor for Arrow {
-	type Options = ArrowOpt;
+	type Form = ArrowForm;
 
 	const NAME: &str = "arrow";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
 		let confirm = &mut cx.core.confirm;
 
 		let area = cx.core.mgr.area(confirm.position);
 		let len = confirm.list.line_count(area.width);
 
 		let old = confirm.offset;
-		confirm.offset = opt.step.add(confirm.offset, len, area.height as _);
+		confirm.offset = form.step.add(confirm.offset, len, area.height as _, 0, 0);
 
 		succ!(render!(old != confirm.offset));
 	}

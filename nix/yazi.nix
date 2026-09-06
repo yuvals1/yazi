@@ -12,7 +12,7 @@
 
   # default optional deps
   jq,
-  poppler_utils,
+  poppler-utils,
   _7zz,
   ffmpeg,
   fd,
@@ -39,7 +39,7 @@ let
 
   defaultDeps = [
     jq
-    poppler_utils
+    poppler-utils
     _7zz
     ffmpeg
     fd
@@ -96,6 +96,8 @@ runCommand yazi-unwrapped.name
     inherit (yazi-unwrapped) pname version meta;
 
     nativeBuildInputs = [ makeWrapper ];
+
+    passthru.runtimePaths = runtimePaths;
   }
   ''
     mkdir -p $out/bin

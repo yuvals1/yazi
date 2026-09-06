@@ -1,8 +1,8 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ffi::OsString};
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand, command};
-use yazi_shared::{Id, event::Cmd};
+use clap::{Parser, Subcommand};
+use yazi_shared::id::Id;
 
 #[derive(Parser)]
 #[command(name = "Ya", about, long_about = None)]
@@ -17,42 +17,55 @@ pub(super) struct Args {
 
 #[derive(Subcommand)]
 pub(super) enum Command {
-	/// Emit a command to be executed by the current instance.
+	/// Emit an action to be executed by the current instance.
 	Emit(CommandEmit),
-	/// Emit a command to be executed by the specified instance.
+	/// Emit an action to be executed by the specified instance.
 	EmitTo(CommandEmitTo),
+	/// Execute an action on the current instance and print its result.
+	Exec(CommandExec),
 	/// Manage packages.
 	#[command(subcommand)]
 	Pkg(CommandPkg),
-	#[command(hide = true)]
-	/// Manage packages.
-	Pack(CommandPack), // TODO: remove
 	/// Publish a message to the current instance.
 	Pub(CommandPub),
 	/// Publish a message to the specified instance.
 	PubTo(CommandPubTo),
 	/// Subscribe to messages from all remote instances.
 	Sub(CommandSub),
+	/// Manage the cache.
+	#[command(subcommand)]
+	Cache(CommandCache),
+	/// Print environment and configuration information.
+	Env,
 }
 
 #[derive(clap::Args)]
 pub(super) struct CommandEmit {
-	/// Name of the command.
+	/// Name of the action.
 	pub(super) name: String,
-	/// Arguments of the command.
+	/// Arguments of the action.
 	#[arg(allow_hyphen_values = true, trailing_var_arg = true)]
-	pub(super) args: Vec<String>,
+	pub(super) args: Vec<OsString>,
 }
 
 #[derive(clap::Args)]
 pub(super) struct CommandEmitTo {
 	/// Receiver ID.
 	pub(super) receiver: Id,
-	/// Name of the command.
+	/// Name of the action.
 	pub(super) name:     String,
-	/// Arguments of the command.
+	/// Arguments of the action.
 	#[arg(allow_hyphen_values = true, trailing_var_arg = true)]
-	pub(super) args:     Vec<String>,
+	pub(super) args:     Vec<OsString>,
+}
+
+#[derive(clap::Args)]
+pub(super) struct CommandExec {
+	/// Name of the action.
+	pub(super) name: String,
+	/// Arguments of the action.
+	#[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+	pub(super) args: Vec<OsString>,
 }
 
 #[derive(Subcommand)]
@@ -69,38 +82,28 @@ pub(super) enum CommandPkg {
 	Delete {
 		/// Packages to delete.
 		#[arg(index = 1, num_args = 1..)]
-		ids: Vec<String>,
+		ids:     Vec<String>,
+		/// Discard local changes made to packages while deleting.
+		#[arg(long)]
+		discard: bool,
 	},
 	/// Install all packages.
-	Install,
+	Install {
+		/// Discard local changes made to packages while installing.
+		#[arg(long)]
+		discard: bool,
+	},
 	/// List all packages.
 	List,
 	/// Upgrade all packages.
 	Upgrade {
 		/// Packages to upgrade, upgrade all if unspecified.
 		#[arg(index = 1, num_args = 0..)]
-		ids: Vec<String>,
+		ids:     Vec<String>,
+		/// Discard local changes made to packages while upgrading.
+		#[arg(long)]
+		discard: bool,
 	},
-}
-
-#[derive(clap::Args)]
-#[command(arg_required_else_help = true)]
-pub(super) struct CommandPack {
-	/// Add packages.
-	#[arg(short = 'a', long, num_args = 1..)]
-	pub(super) add:     Option<Vec<String>>,
-	/// Delete packages.
-	#[arg(short = 'd', long, num_args = 1..)]
-	pub(super) delete:  Option<Vec<String>>,
-	/// Install all packages.
-	#[arg(short = 'i', long)]
-	pub(super) install: bool,
-	/// List all packages.
-	#[arg(short = 'l', long)]
-	pub(super) list:    bool,
-	/// Upgrade all packages.
-	#[arg(short = 'u', long)]
-	pub(super) upgrade: bool,
 }
 
 #[derive(clap::Args)]
@@ -156,16 +159,53 @@ pub(super) struct CommandSub {
 	pub(super) kinds: String,
 }
 
+#[derive(Subcommand)]
+pub(super) enum CommandCache {
+	/// Clear the cache directory.
+	Clear,
+}
+
 // --- Macros
 macro_rules! impl_emit_body {
 	($name:ident) => {
 		impl $name {
 			#[allow(dead_code)]
 			pub(super) fn body(self) -> Result<String> {
-				Ok(serde_json::to_string(&(
-					self.name,
-					Cmd::parse_args(self.args.into_iter(), None, false)?,
-				))?)
+				#[derive(serde::Serialize)]
+				#[serde(untagged)]
+				enum Elem {
+					Name(String),
+					Arg(Vec<u8>),
+				}
+
+				let action: Vec<_> = [Elem::Name(self.name)]
+					.into_iter()
+					.chain(self.args.into_iter().map(|s| Elem::Arg(s.into_encoded_bytes())))
+					.collect();
+				Ok(serde_json::to_string(&action)?)
+			}
+		}
+	};
+}
+
+macro_rules! impl_exec_body {
+	($name:ident) => {
+		impl $name {
+			#[allow(dead_code)]
+			pub(super) fn body(self, reply_to: Id) -> Result<String> {
+				#[derive(serde::Serialize)]
+				#[serde(untagged)]
+				enum Elem {
+					Id(Id),
+					Name(String),
+					Arg(Vec<u8>),
+				}
+
+				let action: Vec<_> = [Elem::Id(reply_to), Elem::Name(self.name)]
+					.into_iter()
+					.chain(self.args.into_iter().map(|s| Elem::Arg(s.into_encoded_bytes())))
+					.collect();
+				Ok(serde_json::to_string(&action)?)
 			}
 		}
 	};
@@ -192,6 +232,8 @@ macro_rules! impl_pub_body {
 
 impl_emit_body!(CommandEmit);
 impl_emit_body!(CommandEmitTo);
+
+impl_exec_body!(CommandExec);
 
 impl_pub_body!(CommandPub);
 impl_pub_body!(CommandPubTo);

@@ -1,21 +1,28 @@
 [package]
-name        = "yazi-build"
-version     = "0.1.8"
-edition     = "2024"
-license     = "MIT"
-authors     = [ "sxyazi <sxyazi@gmail.com>" ]
-description = "Yazi build system"
-homepage    = "https://yazi-rs.github.io"
-repository  = "https://github.com/sxyazi/yazi"
+name                   = "yazi-build"
+description            = "Yazi build system"
+version                = "26.9.1"
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
 
-[profile.release]
-codegen-units = 1
-lto           = true
-panic         = "abort"
-strip         = true
+[lints]
+workspace = true
+
+[dependencies]
+yazi-macro = { path = "../yazi-macro", version = "26.9.1" }
+
+# External dependencies
+anyhow = { workspace = true }
 
 [build-dependencies]
-yazi-term = { path = "../yazi-term", version = "25.5.31" }
+yazi-tty = { path = "../yazi-tty", version = "26.9.1" }
+
+# External dependencies
+anyhow = { workspace = true }
 
 [[bin]]
 name = "yazi-build"

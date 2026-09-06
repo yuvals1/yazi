@@ -9,6 +9,9 @@ on:
 env:
   SCCACHE_GHA_ENABLED: true
 
+permissions:
+  contents: read
+
 jobs:
   build-unix:
     strategy:
@@ -16,9 +19,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            gcc: gcc-aarch64-linux-gnu
           - os: ubuntu-latest
             target: i686-unknown-linux-gnu
             gcc: gcc-i686-linux-gnu
@@ -34,28 +36,28 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER: i686-linux-gnu-gcc
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
       CARGO_TARGET_SPARC64_UNKNOWN_LINUX_GNU_LINKER: sparc64-linux-gnu-gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install gcc
         if: matrix.gcc != ''
         run: sudo apt update && sudo apt install -yq ${{ matrix.gcc }}
 
-      - name: Setup Rust toolchain
-        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build
         run: ./scripts/build.sh ${{ matrix.target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -77,30 +79,20 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link.exe
       CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: lld-link.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Rust toolchain
-        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build
-        run: cargo build --profile release-windows --locked --target ${{ matrix.target }}
-
-      - name: Pack artifact
-        env:
-          TARGET_NAME: yazi-${{ matrix.target }}
-        run: |
-          New-Item -ItemType Directory -Path ${env:TARGET_NAME}
-          Copy-Item -Path "target\${{ matrix.target }}\release-windows\ya.exe" -Destination ${env:TARGET_NAME}
-          Copy-Item -Path "target\${{ matrix.target }}\release-windows\yazi.exe" -Destination ${env:TARGET_NAME}
-          Copy-Item -Path "yazi-boot\completions" -Destination ${env:TARGET_NAME} -Recurse
-          Copy-Item -Path "README.md", "LICENSE" -Destination ${env:TARGET_NAME}
-          Compress-Archive -Path ${env:TARGET_NAME} -DestinationPath "${env:TARGET_NAME}.zip"
+        run: cargo xtask dist --target ${{ matrix.target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: yazi-${{ matrix.target }}.zip
@@ -115,20 +107,20 @@ jobs:
     container:
       image: docker://ghcr.io/cross-rs/${{ matrix.target }}:edge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build
         run: ./scripts/build.sh ${{ matrix.target }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -145,12 +137,12 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup LXD
-        uses: canonical/setup-lxd@v0.1.3
+        uses: canonical/setup-lxd@v1
 
       - name: Setup snapcraft
         run: sudo snap install --classic snapcraft
@@ -162,7 +154,7 @@ jobs:
         run: mv yazi_*.snap yazi-${{ matrix.arch }}.snap
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: snap-${{ matrix.arch }}
           path: yazi-${{ matrix.arch }}.snap
@@ -171,7 +163,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-snap]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: snap-*
           merge-multiple: true
@@ -184,14 +176,14 @@ jobs:
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
         run: |
-          parallel 'snapcraft upload -v --release latest/candidate {}' ::: yazi-*.snap || true
+          parallel 'snapcraft upload -v --release latest/candidate {}' ::: yazi-*.snap
 
       - name: Push snap to edge channel
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}
         run: |
-          parallel 'snapcraft upload -v --release latest/edge {}' ::: yazi-*.snap || true
+          parallel 'snapcraft upload -v --release latest/edge {}' ::: yazi-*.snap
 
   draft:
     if: startsWith(github.ref, 'refs/tags/')
@@ -200,12 +192,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-unix, build-windows, build-musl, build-snap]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
       - name: Draft
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: |
@@ -225,22 +217,22 @@ jobs:
           echo 'NIGHTLY_BODY<<EOF' >> $GITHUB_ENV
           echo "From commit: ${GITHUB_SHA:0:8}" >> $GITHUB_ENV
           echo "Generated on: $(date -u +"%Y-%m-%d %H:%M") UTC" >> $GITHUB_ENV
+          echo "Nightly changelog: https://github.com/sxyazi/yazi/blob/main/CHANGELOG.md#unreleased" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
       - name: Update the tag
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag --force nightly && git push --force origin tag nightly
+          git tag --force nightly "$GITHUB_SHA"
+          git push --force origin tag nightly
 
       - name: Nightly
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly
           prerelease: true
@@ -251,3 +243,10 @@ jobs:
           name: Nightly Build
           body: ${{ env.NIGHTLY_BODY }}
           target_commitish: ${{ github.sha }}
+
+      - name: Publish APT nightly
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.BUILDS_TOKEN }}
+          repository: yazi-rs/builds
+          event-type: publish-apt

@@ -1,41 +1,37 @@
-yazi_macro::mod_pub!(package shared);
+yazi_macro::mod_pub!(cache dds env package shared);
 
 yazi_macro::mod_flat!(args);
 
-use std::process::ExitCode;
-
 use clap::Parser;
 use yazi_macro::{errln, outln};
+use yazi_shared::LOCAL_SET;
 
 #[tokio::main]
-async fn main() -> ExitCode {
-	match run().await {
-		Ok(()) => ExitCode::SUCCESS,
+async fn main() -> anyhow::Result<()> {
+	yazi_shim::init()?;
+	yazi_shared::init();
+	yazi_fs::init();
+
+	match LOCAL_SET.run_until(run()).await {
+		Ok(()) => Ok(()),
 		Err(e) => {
 			for cause in e.chain() {
 				if let Some(ioerr) = cause.downcast_ref::<std::io::Error>()
 					&& ioerr.kind() == std::io::ErrorKind::BrokenPipe
 				{
-					return ExitCode::from(0);
+					return Ok(());
 				}
 			}
+
 			errln!("{e:#}").ok();
-			ExitCode::FAILURE
+			Err(e)
 		}
 	}
 }
 
 async fn run() -> anyhow::Result<()> {
-	yazi_shared::init();
-	yazi_fs::init();
-
-	if std::env::args_os().nth(1).is_some_and(|s| s == "-V" || s == "--version") {
-		outln!(
-			"Ya {} ({} {})",
-			env!("CARGO_PKG_VERSION"),
-			env!("VERGEN_GIT_SHA"),
-			env!("VERGEN_BUILD_DATE")
-		)?;
+	if yazi_version::has_dash_v() {
+		outln!("Ya\n{}", yazi_version::version_full())?;
 		return Ok(());
 	}
 
@@ -43,9 +39,7 @@ async fn run() -> anyhow::Result<()> {
 		Command::Emit(cmd) => {
 			yazi_boot::init_default();
 			yazi_dds::init();
-			if let Err(e) =
-				yazi_dds::Client::shot("dds-emit", CommandPub::receiver()?, &cmd.body()?).await
-			{
+			if let Err(e) = dds::Dds::shot("dds-emit", CommandPub::receiver()?, &cmd.body()?).await {
 				errln!("Cannot emit command: {e}")?;
 				std::process::exit(1);
 			}
@@ -54,9 +48,22 @@ async fn run() -> anyhow::Result<()> {
 		Command::EmitTo(cmd) => {
 			yazi_boot::init_default();
 			yazi_dds::init();
-			if let Err(e) = yazi_dds::Client::shot("dds-emit", cmd.receiver, &cmd.body()?).await {
+			if let Err(e) = dds::Dds::shot("dds-emit", cmd.receiver, &cmd.body()?).await {
 				errln!("Cannot emit command: {e}")?;
 				std::process::exit(1);
+			}
+		}
+
+		Command::Exec(cmd) => {
+			yazi_boot::init_default();
+			yazi_dds::init();
+
+			match dds::Dds::exec(cmd).await {
+				Ok(data) => outln!("{}", serde_json::to_string(&data)?)?,
+				Err(e) => {
+					errln!("Cannot execute command: {e}")?;
+					std::process::exit(1);
+				}
 			}
 		}
 
@@ -66,36 +73,17 @@ async fn run() -> anyhow::Result<()> {
 			let mut pkg = package::Package::load().await?;
 			match cmd {
 				CommandPkg::Add { ids } => pkg.add_many(&ids).await?,
-				CommandPkg::Delete { ids } => pkg.delete_many(&ids).await?,
-				CommandPkg::Install => pkg.install().await?,
+				CommandPkg::Delete { ids, discard } => pkg.delete_many(&ids, discard).await?,
+				CommandPkg::Install { discard } => pkg.install(discard).await?,
 				CommandPkg::List => pkg.print()?,
-				CommandPkg::Upgrade { ids } => pkg.upgrade_many(&ids).await?,
-			}
-		}
-
-		Command::Pack(cmd) => {
-			package::init()?;
-			outln!(
-				"WARNING: `ya pack` is deprecated, use the new `ya pkg` instead. See https://github.com/sxyazi/yazi/pull/2770 for more details."
-			)?;
-			if cmd.install {
-				package::Package::load().await?.install().await?;
-			} else if cmd.list {
-				package::Package::load().await?.print()?;
-			} else if cmd.upgrade {
-				package::Package::load().await?.upgrade_many(&[]).await?;
-			} else if let Some(uses) = cmd.add {
-				package::Package::load().await?.add_many(&uses).await?;
-			} else if let Some(uses) = cmd.delete {
-				package::Package::load().await?.delete_many(&uses).await?;
+				CommandPkg::Upgrade { ids, discard } => pkg.upgrade_many(&ids, discard).await?,
 			}
 		}
 
 		Command::Pub(cmd) => {
 			yazi_boot::init_default();
 			yazi_dds::init();
-			if let Err(e) = yazi_dds::Client::shot(&cmd.kind, CommandPub::receiver()?, &cmd.body()?).await
-			{
+			if let Err(e) = dds::Dds::shot(&cmd.kind, CommandPub::receiver()?, &cmd.body()?).await {
 				errln!("Cannot send message: {e}")?;
 				std::process::exit(1);
 			}
@@ -104,7 +92,7 @@ async fn run() -> anyhow::Result<()> {
 		Command::PubTo(cmd) => {
 			yazi_boot::init_default();
 			yazi_dds::init();
-			if let Err(e) = yazi_dds::Client::shot(&cmd.kind, cmd.receiver, &cmd.body()?).await {
+			if let Err(e) = dds::Dds::shot(&cmd.kind, cmd.receiver, &cmd.body()?).await {
 				errln!("Cannot send message: {e}")?;
 				std::process::exit(1);
 			}
@@ -113,9 +101,27 @@ async fn run() -> anyhow::Result<()> {
 		Command::Sub(cmd) => {
 			yazi_boot::init_default();
 			yazi_dds::init();
-			yazi_dds::Client::draw(cmd.kinds.split(',').collect()).await?;
+			dds::Dds::draw(cmd.kinds.split(',').collect()).await?;
 
 			tokio::signal::ctrl_c().await?;
+		}
+
+		Command::Cache(cmd) => {
+			yazi_tty::init();
+			yazi_config::setup()?;
+
+			match cmd {
+				CommandCache::Clear => {
+					cache::Cache::clear()?;
+				}
+			}
+		}
+
+		Command::Env => {
+			yazi_tty::init();
+			yazi_term::setup()?;
+			yazi_config::setup()?;
+			outln!("{}", env::Env::print().await?)?;
 		}
 	}
 

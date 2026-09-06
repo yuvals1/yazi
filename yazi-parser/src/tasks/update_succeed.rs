@@ -1,28 +1,26 @@
-use anyhow::bail;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{event::CmdCow, url::UrlBuf};
+use serde::Deserialize;
+use yazi_shared::{event::ActionCow, id::Id, url::UrlBuf};
 
-#[derive(Debug)]
-pub struct UpdateSucceedOpt {
-	pub urls: Vec<UrlBuf>,
+#[derive(Debug, Deserialize)]
+pub struct UpdateSucceedForm {
+	#[serde(alias = "0")]
+	pub id:    Id,
+	pub urls:  Vec<UrlBuf>,
+	#[serde(default)]
+	pub track: bool,
 }
 
-impl TryFrom<CmdCow> for UpdateSucceedOpt {
+impl TryFrom<ActionCow> for UpdateSucceedForm {
 	type Error = anyhow::Error;
 
-	fn try_from(mut c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(urls) = c.take_any("urls") else {
-			bail!("Invalid 'urls' argument in UpdateSucceedOpt");
-		};
-
-		Ok(Self { urls })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for UpdateSucceedOpt {
+impl FromLua for UpdateSucceedForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for UpdateSucceedOpt {
+impl IntoLua for UpdateSucceedForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

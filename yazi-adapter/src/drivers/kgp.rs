@@ -1,14 +1,17 @@
 use core::str;
-use std::{io::Write, path::Path};
+use std::{io::Write, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose};
-use crossterm::{cursor::MoveTo, queue};
 use image::DynamicImage;
-use ratatui::layout::Rect;
-use yazi_shared::SyncCell;
+use ratatui_core::{layout::Rect, style::Color};
+use yazi_config::THEME;
+use yazi_emulator::{CLOSE, EMULATOR, ESCAPE, Emulator, START};
+use yazi_ffi::shm::NamedSharedMemory;
+use yazi_tty::sequence::{MoveTo, ResetAttrs, SetBg, SetFg};
 
-use crate::{CLOSE, ESCAPE, Emulator, START, adapter::Adapter, image::Image};
+use super::KgpPayload;
+use crate::{ADAPTOR, drivers::kgp_id, image::Image};
 
 static DIACRITICS: [char; 297] = [
 	'\u{0305}',
@@ -310,18 +313,18 @@ static DIACRITICS: [char; 297] = [
 	'\u{1D244}',
 ];
 
-pub(crate) struct Kgp;
+pub(super) struct Kgp;
 
 impl Kgp {
-	pub(crate) async fn image_show(path: &Path, max: Rect) -> Result<Rect> {
+	pub(super) async fn image_show(path: PathBuf, max: Rect) -> Result<Rect> {
 		let img = Image::downscale(path, max).await?;
 		let area = Image::pixel_area((img.width(), img.height()), max);
 
 		let b1 = Self::encode(img).await?;
 		let b2 = Self::place(&area)?;
 
-		Adapter::Kgp.image_hide()?;
-		Adapter::shown_store(area);
+		ADAPTOR.image_hide()?;
+		ADAPTOR.shown_store(area);
 		Emulator::move_lock((area.x, area.y), |w| {
 			w.write_all(&b1)?;
 			w.write_all(&b2)?;
@@ -329,45 +332,66 @@ impl Kgp {
 		})
 	}
 
-	pub(crate) fn image_erase(area: Rect) -> Result<()> {
+	pub(super) fn image_erase(area: Rect) -> Result<()> {
 		let s = " ".repeat(area.width as usize);
 		Emulator::move_lock((0, 0), |w| {
+			if let Some(c) = THEME.app.overall.get().bg {
+				write!(w, "{}", SetBg(c))?;
+			}
+
 			for y in area.top()..area.bottom() {
-				queue!(w, MoveTo(area.x, y))?;
+				write!(w, "{}", MoveTo(area.x, y))?;
 				write!(w, "{s}")?;
 			}
 
-			write!(w, "{START}_Gq=2,a=d,d=A{ESCAPE}\\{CLOSE}")?;
+			write!(w, "{ResetAttrs}{START}_Gq=2,a=d,d=A{ESCAPE}\\{CLOSE}")?;
 			Ok(())
 		})
 	}
 
-	async fn encode(img: DynamicImage) -> Result<Vec<u8>> {
-		fn output(raw: &[u8], format: u8, size: (u32, u32)) -> Result<Vec<u8>> {
-			let b64 = general_purpose::STANDARD.encode(raw).into_bytes();
+	async fn encode(img: DynamicImage) -> Result<KgpPayload> {
+		fn output(raw: &[u8], format: u8, size: (u32, u32)) -> Result<KgpPayload> {
+			output_shm(raw, format, size).or_else(|_| output_b64(raw, format, size))
+		}
 
+		fn output_shm(raw: &[u8], format: u8, (w, h): (u32, u32)) -> Result<KgpPayload> {
+			if !EMULATOR.kgp_shm.get() {
+				bail!("Shared memory is not supported by the terminal")
+			}
+
+			let mut pl = KgpPayload::with(200, NamedSharedMemory::new(raw)?);
+			write!(
+				pl,
+				"{START}_Gq=2,a=T,C=1,U=1,t=s,f={format},s={w},v={h},i={},S={};{}{ESCAPE}\\{CLOSE}",
+				kgp_id(),
+				raw.len(),
+				pl.name(),
+			)?;
+
+			Ok(pl)
+		}
+
+		fn output_b64(raw: &[u8], format: u8, (w, h): (u32, u32)) -> Result<KgpPayload> {
+			let b64 = general_purpose::STANDARD.encode(raw).into_bytes();
 			let mut it = b64.chunks(4096).peekable();
-			let mut buf = Vec::with_capacity(b64.len() + it.len() * 50);
+			let mut pl = KgpPayload::new(b64.len() + it.len() * 50);
 			if let Some(first) = it.next() {
 				write!(
-					buf,
-					"{START}_Gq=2,a=T,C=1,U=1,f={format},s={},v={},i={},m={};{}{ESCAPE}\\{CLOSE}",
-					size.0,
-					size.1,
-					Kgp::image_id(),
+					pl,
+					"{START}_Gq=2,a=T,C=1,U=1,f={format},s={w},v={h},i={},m={};{}{ESCAPE}\\{CLOSE}",
+					kgp_id(),
 					it.peek().is_some() as u8,
 					unsafe { str::from_utf8_unchecked(first) },
 				)?;
 			}
 
 			while let Some(chunk) = it.next() {
-				write!(buf, "{START}_Gm={};{}{ESCAPE}\\{CLOSE}", it.peek().is_some() as u8, unsafe {
+				write!(pl, "{START}_Gm={};{}{ESCAPE}\\{CLOSE}", it.peek().is_some() as u8, unsafe {
 					str::from_utf8_unchecked(chunk)
 				})?;
 			}
 
-			write!(buf, "{CLOSE}")?;
-			Ok(buf)
+			Ok(pl)
 		}
 
 		let size = (img.width(), img.height());
@@ -380,32 +404,26 @@ impl Kgp {
 	}
 
 	fn place(area: &Rect) -> Result<Vec<u8>> {
-		let mut buf = Vec::with_capacity(area.width as usize * area.height as usize * 3 + 50);
+		let mut buf = Vec::with_capacity(area.width as usize * area.height as usize * 3 + 500);
 
-		let id = Self::image_id();
+		let id = kgp_id();
 		let (r, g, b) = ((id >> 16) & 0xff, (id >> 8) & 0xff, id & 0xff);
-		write!(buf, "\x1b[38;2;{r};{g};{b}m")?;
+		write!(buf, "{}", SetFg(Color::Rgb(r as u8, g as u8, b as u8)))?;
+
+		if let Some(c) = THEME.app.overall.get().bg {
+			write!(buf, "{}", SetBg(c))?;
+		}
 
 		for y in 0..area.height {
-			write!(buf, "\x1b[{};{}H", area.y + y + 1, area.x + 1)?;
+			write!(buf, "{}", MoveTo(area.x, area.y + y))?;
 			for x in 0..area.width {
 				write!(buf, "\u{10EEEE}")?;
 				write!(buf, "{}", *DIACRITICS.get(y as usize).unwrap_or(&DIACRITICS[0]))?;
 				write!(buf, "{}", *DIACRITICS.get(x as usize).unwrap_or(&DIACRITICS[0]))?;
 			}
 		}
-		Ok(buf)
-	}
 
-	fn image_id() -> u32 {
-		static CACHE: SyncCell<Option<u32>> = SyncCell::new(None);
-		match CACHE.get() {
-			Some(n) => n,
-			None => {
-				let n = std::process::id() % (0xffffff + 1);
-				CACHE.set(Some(n));
-				n
-			}
-		}
+		write!(buf, "{ResetAttrs}")?;
+		Ok(buf)
 	}
 }

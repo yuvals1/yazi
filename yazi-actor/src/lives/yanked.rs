@@ -1,7 +1,9 @@
 use std::ops::Deref;
 
 use mlua::{AnyUserData, MetaMethod, MultiValue, ObjectLike, UserData, UserDataFields, UserDataMethods};
-use yazi_binding::{Iter, get_metatable};
+use yazi_binding::Iter;
+use yazi_fs::file::File;
+use yazi_shim::mlua::get_metatable;
 
 use super::{Lives, PtrCell};
 
@@ -23,7 +25,7 @@ impl Yanked {
 		Lives::scoped_userdata(Self {
 			inner,
 			iter: Lives::scoped_userdata(Iter::new(
-				inner.as_static().iter().cloned().map(yazi_binding::Url::new),
+				inner.as_static().iter().map(File::from),
 				Some(inner.len()),
 			))?,
 		})

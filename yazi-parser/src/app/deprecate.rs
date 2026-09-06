@@ -1,18 +1,23 @@
-use anyhow::bail;
-use yazi_shared::event::CmdCow;
+use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
+use yazi_shim::SStr;
 
-pub struct DeprecateOpt {
-	pub content: String,
+#[derive(Debug, Deserialize)]
+pub struct DeprecateForm {
+	pub content: SStr,
 }
 
-impl TryFrom<CmdCow> for DeprecateOpt {
+impl TryFrom<ActionCow> for DeprecateForm {
 	type Error = anyhow::Error;
 
-	fn try_from(mut c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(content) = c.take_str("content") else {
-			bail!("Invalid 'content' in DeprecateOpt");
-		};
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
+}
 
-		Ok(Self { content: content.into_owned() })
-	}
+impl FromLua for DeprecateForm {
+	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+}
+
+impl IntoLua for DeprecateForm {
+	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

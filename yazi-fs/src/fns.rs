@@ -1,21 +1,6 @@
-use anyhow::Result;
-use tokio::{io, select, sync::{mpsc, oneshot}, time};
-use yazi_shared::url::{Component, Url, UrlBuf};
+use std::{io, path::Path};
 
-use crate::{cha::Cha, provider};
-
-#[inline]
-pub async fn maybe_exists<'a>(url: impl Into<Url<'a>>) -> bool {
-	match provider::symlink_metadata(url).await {
-		Ok(_) => true,
-		Err(e) => e.kind() != io::ErrorKind::NotFound,
-	}
-}
-
-#[inline]
-pub async fn must_be_dir<'a>(url: impl Into<Url<'a>>) -> bool {
-	provider::metadata(url).await.is_ok_and(|m| m.is_dir())
-}
+use yazi_shared::url::{Component, UrlBuf, UrlLike};
 
 #[inline]
 pub fn ok_or_not_found<T: Default>(result: io::Result<T>) -> io::Result<T> {
@@ -24,127 +9,6 @@ pub fn ok_or_not_found<T: Default>(result: io::Result<T>) -> io::Result<T> {
 		Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
 		Err(_) => result,
 	}
-}
-
-pub fn copy_with_progress(
-	from: &UrlBuf,
-	to: &UrlBuf,
-	cha: Cha,
-) -> mpsc::Receiver<Result<u64, io::Error>> {
-	let (prog_tx, prog_rx) = mpsc::channel(1);
-	let (done_tx, mut done_rx) = oneshot::channel();
-
-	tokio::spawn({
-		let (from, to) = (from.clone(), to.clone());
-		async move {
-			done_tx.send(provider::copy(&from, &to, cha).await).ok();
-		}
-	});
-
-	tokio::spawn({
-		let (prog_tx, to) = (prog_tx.clone(), to.clone());
-		async move {
-			let mut last = 0;
-			let mut done = None;
-			loop {
-				select! {
-					res = &mut done_rx => done = Some(res.unwrap()),
-					_ = prog_tx.closed() => break,
-					_ = time::sleep(time::Duration::from_secs(3)) => {},
-				}
-
-				match done {
-					Some(Ok(len)) => {
-						if len > last {
-							prog_tx.send(Ok(len - last)).await.ok();
-						}
-						prog_tx.send(Ok(0)).await.ok();
-						break;
-					}
-					Some(Err(e)) => {
-						prog_tx.send(Err(e)).await.ok();
-						break;
-					}
-					None => {}
-				}
-
-				let len = provider::symlink_metadata(&to).await.map(|m| m.len()).unwrap_or(0);
-				if len > last {
-					prog_tx.send(Ok(len - last)).await.ok();
-					last = len;
-				}
-			}
-		}
-	});
-
-	prog_rx
-}
-
-pub async fn remove_dir_clean(dir: &UrlBuf) {
-	let Ok(mut it) = provider::read_dir(dir).await else { return };
-
-	while let Ok(Some(entry)) = it.next_entry().await {
-		if entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-			let url = entry.url();
-			Box::pin(remove_dir_clean(&url)).await;
-			provider::remove_dir(&url).await.ok();
-		}
-	}
-
-	provider::remove_dir(dir).await.ok();
-}
-
-// Convert a file mode to a string representation
-#[cfg(unix)]
-#[allow(clippy::collapsible_else_if)]
-pub fn permissions(m: libc::mode_t, dummy: bool) -> String {
-	use libc::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFSOCK, S_IRGRP, S_IROTH, S_IRUSR, S_ISGID, S_ISUID, S_ISVTX, S_IWGRP, S_IWOTH, S_IWUSR, S_IXGRP, S_IXOTH, S_IXUSR};
-	let mut s = String::with_capacity(10);
-
-	// Filetype
-	s.push(match m & S_IFMT {
-		S_IFBLK => 'b',
-		S_IFCHR => 'c',
-		S_IFDIR => 'd',
-		S_IFIFO => 'p',
-		S_IFLNK => 'l',
-		S_IFSOCK => 's',
-		_ => '-',
-	});
-
-	if dummy {
-		s.push_str("?????????");
-		return s;
-	}
-
-	// Owner
-	s.push(if m & S_IRUSR != 0 { 'r' } else { '-' });
-	s.push(if m & S_IWUSR != 0 { 'w' } else { '-' });
-	s.push(if m & S_IXUSR != 0 {
-		if m & S_ISUID != 0 { 's' } else { 'x' }
-	} else {
-		if m & S_ISUID != 0 { 'S' } else { '-' }
-	});
-
-	// Group
-	s.push(if m & S_IRGRP != 0 { 'r' } else { '-' });
-	s.push(if m & S_IWGRP != 0 { 'w' } else { '-' });
-	s.push(if m & S_IXGRP != 0 {
-		if m & S_ISGID != 0 { 's' } else { 'x' }
-	} else {
-		if m & S_ISGID != 0 { 'S' } else { '-' }
-	});
-
-	// Other
-	s.push(if m & S_IROTH != 0 { 'r' } else { '-' });
-	s.push(if m & S_IWOTH != 0 { 'w' } else { '-' });
-	s.push(if m & S_IXOTH != 0 {
-		if m & S_ISVTX != 0 { 't' } else { 'x' }
-	} else {
-		if m & S_ISVTX != 0 { 'T' } else { '-' }
-	});
-
-	s
 }
 
 // Find the max common root in a list of urls
@@ -172,7 +36,7 @@ pub fn max_common_root(urls: &[UrlBuf]) -> usize {
 			.components()
 			.zip(parent.components())
 			.take_while(|(a, b)| match (a, b) {
-				(Component::Scheme(a), Component::Scheme(b)) => a.covariant(*b),
+				(Component::Auth(a), Component::Auth(b)) => a.covariant(b),
 				(a, b) => a == b,
 			})
 			.count()
@@ -189,9 +53,12 @@ pub fn max_common_root(urls: &[UrlBuf]) -> usize {
 #[cfg(unix)]
 #[test]
 fn test_max_common_root() {
+	yazi_shared::init_tests();
+
 	fn assert(input: &[&str], expected: &str) {
 		use std::{ffi::OsStr, str::FromStr};
-		let urls: Vec<_> = input.iter().copied().map(UrlBuf::from_str).collect::<Result<_>>().unwrap();
+		let urls: Vec<_> =
+			input.iter().copied().map(UrlBuf::from_str).collect::<Result<_, _>>().unwrap();
 
 		let mut comp = urls[0].components();
 		for _ in 0..comp.clone().count() - max_common_root(&urls) {
@@ -203,10 +70,56 @@ fn test_max_common_root() {
 	assert_eq!(max_common_root(&[]), 0);
 	assert(&[""], "");
 	assert(&["a"], "");
+	assert(&["search://kw:1:1/a", "search://kw:1:1/b"], "search://kw/");
+	assert(&["test-hub://a1/@root/a", "test-hub://b1/@root/b"], "test-hub://root/@/");
 
 	assert(&["/a"], "/");
 	assert(&["/a/b"], "/a");
 	assert(&["/a/b/c", "/a/b/d"], "/a/b");
 	assert(&["/aa/bb/cc", "/aa/dd/ee"], "/aa");
 	assert(&["/aa/bb/cc", "/aa/bb/cc/dd/ee", "/aa/bb/cc/ff"], "/aa/bb");
+}
+
+pub async fn create_owned_dir(p: &Path) -> io::Result<()> {
+	let p = p.to_owned();
+	tokio::task::spawn_blocking(move || create_owned_dir_blocking(&p)).await?
+}
+
+pub fn create_owned_dir_blocking(p: &Path) -> io::Result<()> {
+	#[cfg(unix)]
+	{
+		use std::{fs::{DirBuilder, OpenOptions}, mem, os::unix::{fs::{DirBuilderExt, OpenOptionsExt}, io::AsRawFd}};
+
+		use libc::{O_DIRECTORY, O_NOFOLLOW};
+		use uzers::Users;
+		use yazi_shared::USERS_CACHE;
+
+		DirBuilder::new().mode(0o700).recursive(true).create(p)?;
+		let dir = OpenOptions::new().read(true).custom_flags(O_DIRECTORY | O_NOFOLLOW).open(p)?;
+
+		let mut stat: libc::stat = unsafe { mem::zeroed() };
+		if unsafe { libc::fstat(dir.as_raw_fd(), &mut stat) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+
+		// Reject directories not owned by the current user.
+		let uid = USERS_CACHE.get_current_uid();
+		if stat.st_uid != uid {
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				format!("directory {:?} is owned by uid {} but current uid is {}", p, stat.st_uid, uid),
+			));
+		}
+
+		// Enforce mode 0o700 via the fd.
+		if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+
+		Ok(())
+	}
+	#[cfg(not(unix))]
+	{
+		std::fs::DirBuilder::new().recursive(true).create(p)
+	}
 }

@@ -6,19 +6,19 @@ use yazi_shared::url::UrlBuf;
 
 use super::Ember;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmberMove<'a> {
-	pub items: Cow<'a, Vec<BodyMoveItem>>,
+	items: Cow<'a, Vec<EmberMoveItem>>,
 }
 
 impl<'a> EmberMove<'a> {
-	pub fn borrowed(items: &'a Vec<BodyMoveItem>) -> Ember<'a> {
+	pub(crate) fn borrowed(items: &'a Vec<EmberMoveItem>) -> Ember<'a> {
 		Self { items: Cow::Borrowed(items) }.into()
 	}
 }
 
 impl EmberMove<'static> {
-	pub fn owned(items: Vec<BodyMoveItem>) -> Ember<'static> {
+	pub(crate) fn owned(items: Vec<EmberMoveItem>) -> Ember<'static> {
 		Self { items: Cow::Owned(items) }.into()
 	}
 }
@@ -34,19 +34,14 @@ impl IntoLua for EmberMove<'_> {
 }
 
 // --- Item
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BodyMoveItem {
-	pub from: UrlBuf,
-	pub to:   UrlBuf,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EmberMoveItem {
+	pub(crate) from: UrlBuf,
+	pub(crate) to:   UrlBuf,
 }
 
-impl IntoLua for BodyMoveItem {
+impl IntoLua for EmberMoveItem {
 	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
-		lua
-			.create_table_from([
-				("from", yazi_binding::Url::new(self.from)),
-				("to", yazi_binding::Url::new(self.to)),
-			])?
-			.into_lua(lua)
+		lua.create_table_from([("from", self.from), ("to", self.to)])?.into_lua(lua)
 	}
 }

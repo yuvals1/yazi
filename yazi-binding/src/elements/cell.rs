@@ -1,20 +1,31 @@
-use mlua::{ExternalError, FromLua};
+use mlua::{FromLua, Lua, Value};
+use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
 
 use super::Text;
 
-const EXPECTED: &str = "expected a table of strings, Texts, Lines or Spans";
-
 #[derive(Clone, Debug)]
 pub struct Cell {
-	pub(super) text: ratatui::text::Text<'static>,
+	pub(super) text: Text,
 }
 
-impl From<Cell> for ratatui::widgets::Cell<'static> {
-	fn from(value: Cell) -> Self { Self::new(value.text) }
+impl From<Cell> for ratatui_widgets::table::Cell<'static> {
+	fn from(value: Cell) -> Self { Self::new(value.text.inner) }
+}
+
+impl Cell {
+	pub(super) fn height(&self, width: u16) -> u16 {
+		self.text.line_count(width).min(u16::MAX as usize) as u16
+	}
+
+	pub(super) fn render_overlay(&self, area: Rect, buf: &mut Buffer) {
+		if self.text.needs_upgrade() {
+			(&self.text).render(area, buf);
+		}
+	}
 }
 
 impl FromLua for Cell {
-	fn from_lua(value: mlua::Value, _: &mlua::Lua) -> mlua::Result<Self> {
-		Ok(Self { text: Text::try_from(value).map_err(|_| EXPECTED.into_lua_err())?.inner })
+	fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> {
+		Ok(Self { text: Text::from_lua(value, lua)? })
 	}
 }

@@ -1,36 +1,31 @@
-use std::str::FromStr;
+use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Value};
+use serde::{Deserialize, Serialize};
+use yazi_fs::{SortBy, SortFallback};
+use yazi_shared::event::ActionCow;
+use yazi_shim::mlua::SER_OPT;
 
-use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_fs::SortBy;
-use yazi_shared::event::CmdCow;
-
-#[derive(Debug, Default)]
-pub struct SortOpt {
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct SortForm {
+	#[serde(alias = "0")]
 	pub by:        Option<SortBy>,
 	pub reverse:   Option<bool>,
+	#[serde(alias = "dir-first")]
 	pub dir_first: Option<bool>,
 	pub sensitive: Option<bool>,
 	pub translit:  Option<bool>,
+	pub fallback:  Option<SortFallback>,
 }
 
-impl TryFrom<CmdCow> for SortOpt {
+impl TryFrom<ActionCow> for SortForm {
 	type Error = anyhow::Error;
 
-	fn try_from(c: CmdCow) -> Result<Self, Self::Error> {
-		Ok(Self {
-			by:        c.first_str().map(SortBy::from_str).transpose()?,
-			reverse:   c.maybe_bool("reverse"),
-			dir_first: c.maybe_bool("dir-first"),
-			sensitive: c.maybe_bool("sensitive"),
-			translit:  c.maybe_bool("translit"),
-		})
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for SortOpt {
-	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+impl FromLua for SortForm {
+	fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> { lua.from_value(value) }
 }
 
-impl IntoLua for SortOpt {
-	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+impl IntoLua for SortForm {
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> { lua.to_value_with(&self, SER_OPT) }
 }

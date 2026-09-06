@@ -1,17 +1,25 @@
-use mlua::{IntoLua, Lua, LuaSerdeExt, SerializeOptions, Value};
-use yazi_binding::{Composer, ComposerGet, ComposerSet, Url};
+use mlua::{FromLua, Function, IntoLua, Lua, LuaSerdeExt, Value};
+use yazi_binding::{Composer, ComposerGet, ComposerSet, elements::Wrap, runtime};
 use yazi_boot::ARGS;
-use yazi_config::YAZI;
+use yazi_config::{YAZI, mgr::MgrRatio};
+use yazi_fs::Xdg;
+use yazi_shared::{path::PathBufDyn, url::UrlBuf};
+use yazi_shim::mlua::SER_OPT;
+use yazi_tty::TTY;
 
-pub const SER_OPT: SerializeOptions =
-	SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
-
-pub fn compose() -> Composer<ComposerGet, ComposerSet> {
+pub(crate) fn compose() -> Composer<ComposerGet, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
 		match key {
 			b"args" => args().into_lua(lua)?,
+			b"path" => path().into_lua(lua)?,
+
+			b"tty" => TTY.into_lua(lua)?,
 			b"term" => super::term().into_lua(lua)?,
+			b"scope" => scope(lua)?.into_lua(lua)?,
+
 			b"mgr" => mgr().into_lua(lua)?,
+			b"open" => open().into_lua(lua)?,
+			b"opener" => YAZI.opener.into_lua(lua)?,
 			b"plugin" => super::plugin().into_lua(lua)?,
 			b"preview" => preview().into_lua(lua)?,
 			b"tasks" => tasks().into_lua(lua)?,
@@ -25,12 +33,11 @@ pub fn compose() -> Composer<ComposerGet, ComposerSet> {
 	Composer::new(get, set)
 }
 
-fn args() -> Composer<ComposerGet, ComposerSet> {
+fn path() -> Composer<ComposerGet, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
 		match key {
-			b"entries" => lua.create_sequence_from(ARGS.entries.iter().map(Url::new))?.into_lua(lua),
-			b"cwd_file" => ARGS.cwd_file.as_ref().map(Url::new).into_lua(lua),
-			b"chooser_file" => ARGS.chooser_file.as_ref().map(Url::new).into_lua(lua),
+			b"config_dir" => PathBufDyn::from(Xdg::config_dir()).into_lua(lua),
+			b"runtime_dir" => PathBufDyn::from(Xdg::runtime_dir()).into_lua(lua),
 			_ => Ok(Value::Nil),
 		}
 	}
@@ -40,24 +47,43 @@ fn args() -> Composer<ComposerGet, ComposerSet> {
 	Composer::new(get, set)
 }
 
+fn args() -> Composer<ComposerGet, ComposerSet> {
+	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
+		match key {
+			b"entries" => lua.create_sequence_from(ARGS.entries.iter().cloned())?.into_lua(lua),
+			b"cwd_file" => ARGS.cwd_file.as_ref().map(UrlBuf::from).into_lua(lua),
+			b"chooser_file" => ARGS.chooser_file.as_ref().map(UrlBuf::from).into_lua(lua),
+			_ => Ok(Value::Nil),
+		}
+	}
+
+	fn set(_: &Lua, _: &[u8], value: Value) -> mlua::Result<Value> { Ok(value) }
+
+	Composer::new(get, set)
+}
+
+fn scope(lua: &Lua) -> mlua::Result<Function> {
+	lua.create_function(|lua, ()| Ok(runtime!(lua)?.scope()))
+}
+
 fn mgr() -> Composer<ComposerGet, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
 		let m = &YAZI.mgr;
 		match key {
-			b"ratio" => lua.to_value_with(&m.ratio, SER_OPT)?,
+			b"ratio" => m.ratio.get().into_lua(lua)?,
 
 			b"sort_by" => lua.to_value_with(&m.sort_by, SER_OPT)?,
-			b"sort_sensitive" => lua.to_value_with(&m.sort_sensitive, SER_OPT)?,
-			b"sort_reverse" => lua.to_value_with(&m.sort_reverse, SER_OPT)?,
-			b"sort_dir_first" => lua.to_value_with(&m.sort_dir_first, SER_OPT)?,
-			b"sort_translit" => lua.to_value_with(&m.sort_translit, SER_OPT)?,
+			b"sort_sensitive" => m.sort_sensitive.get().into_lua(lua)?,
+			b"sort_reverse" => m.sort_reverse.get().into_lua(lua)?,
+			b"sort_dir_first" => m.sort_dir_first.get().into_lua(lua)?,
+			b"sort_translit" => m.sort_translit.get().into_lua(lua)?,
+			b"sort_fallback" => lua.to_value_with(&m.sort_fallback, SER_OPT)?,
 
-			b"linemode" => lua.to_value_with(&m.linemode, SER_OPT)?,
-			b"show_hidden" => lua.to_value_with(&m.show_hidden, SER_OPT)?,
-			b"show_symlink" => lua.to_value_with(&m.show_symlink, SER_OPT)?,
-			b"scrolloff" => lua.to_value_with(&m.scrolloff, SER_OPT)?,
+			b"linemode" => lua.create_string(&**m.linemode.load())?.into_lua(lua)?,
+			b"show_hidden" => m.show_hidden.get().into_lua(lua)?,
+			b"show_symlink" => m.show_symlink.get().into_lua(lua)?,
+			b"scrolloff" => m.scrolloff.get().into_lua(lua)?,
 			b"mouse_events" => lua.to_value_with(&m.mouse_events, SER_OPT)?,
-			b"title_format" => lua.to_value_with(&m.title_format, SER_OPT)?,
 			_ => return Ok(Value::Nil),
 		}
 		.into_lua(lua)
@@ -67,7 +93,7 @@ fn mgr() -> Composer<ComposerGet, ComposerSet> {
 		let m = &YAZI.mgr;
 		Ok(match key {
 			b"ratio" => {
-				m.ratio.set(lua.from_value(value)?);
+				m.ratio.set(MgrRatio::from_lua(value, lua)?);
 				Value::Nil
 			}
 			_ => value,
@@ -77,22 +103,35 @@ fn mgr() -> Composer<ComposerGet, ComposerSet> {
 	Composer::new(get, set)
 }
 
+fn open() -> Composer<ComposerGet, ComposerSet> {
+	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
+		match key {
+			b"rules" => YAZI.open.into_lua(lua),
+			_ => Ok(Value::Nil),
+		}
+	}
+
+	fn set(_: &Lua, _: &[u8], value: Value) -> mlua::Result<Value> { Ok(value) }
+
+	Composer::new(get, set)
+}
+
 fn preview() -> Composer<ComposerGet, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
 		let p = &YAZI.preview;
 		match key {
-			b"wrap" => lua.to_value_with(&p.wrap, SER_OPT)?,
-			b"tab_size" => lua.to_value_with(&p.tab_size, SER_OPT)?,
-			b"max_width" => lua.to_value_with(&p.max_width, SER_OPT)?,
-			b"max_height" => lua.to_value_with(&p.max_height, SER_OPT)?,
+			b"wrap" => Wrap::from(p.wrap).into_lua(lua)?,
+			b"tab_size" => p.tab_size.into_lua(lua)?,
+			b"max_width" => p.max_width.into_lua(lua)?,
+			b"max_height" => p.max_height.into_lua(lua)?,
 
 			b"cache_dir" => lua.to_value_with(&p.cache_dir, SER_OPT)?,
 
-			b"image_delay" => lua.to_value_with(&p.image_delay, SER_OPT)?,
-			b"image_filter" => lua.to_value_with(&p.image_filter, SER_OPT)?,
-			b"image_quality" => lua.to_value_with(&p.image_quality, SER_OPT)?,
+			b"image_delay" => p.image_delay.into_lua(lua)?,
+			b"image_filter" => lua.create_string(&p.image_filter)?.into_lua(lua)?,
+			b"image_quality" => p.image_quality.into_lua(lua)?,
 
-			b"ueberzug_scale" => lua.to_value_with(&p.ueberzug_scale, SER_OPT)?,
+			b"ueberzug_scale" => p.ueberzug_scale.into_lua(lua)?,
 			b"ueberzug_offset" => lua.to_value_with(&p.ueberzug_offset, SER_OPT)?,
 			_ => return Ok(Value::Nil),
 		}
@@ -108,14 +147,17 @@ fn tasks() -> Composer<ComposerGet, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8]) -> mlua::Result<Value> {
 		let t = &YAZI.tasks;
 		match key {
-			b"micro_workers" => lua.to_value_with(&t.micro_workers, SER_OPT)?,
-			b"macro_workers" => lua.to_value_with(&t.macro_workers, SER_OPT)?,
-			b"bizarre_retry" => lua.to_value_with(&t.bizarre_retry, SER_OPT)?,
+			b"file_workers" => t.file_workers.get().into_lua(lua)?,
+			b"plugin_workers" => t.plugin_workers.get().into_lua(lua)?,
+			b"fetch_workers" => t.fetch_workers.get().into_lua(lua)?,
+			b"preload_workers" => t.preload_workers.get().into_lua(lua)?,
+			b"process_workers" => t.process_workers.get().into_lua(lua)?,
+			b"bizarre_retry" => t.bizarre_retry.get().into_lua(lua)?,
 
-			b"image_alloc" => lua.to_value_with(&t.image_alloc, SER_OPT)?,
+			b"image_alloc" => t.image_alloc.into_lua(lua)?,
 			b"image_bound" => lua.to_value_with(&t.image_bound, SER_OPT)?,
 
-			b"suppress_preload" => lua.to_value_with(&t.suppress_preload, SER_OPT)?,
+			b"suppress_preload" => t.suppress_preload.into_lua(lua)?,
 			_ => return Ok(Value::Nil),
 		}
 		.into_lua(lua)

@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::{self, Constraint, Offset, Rect}, widgets::{Block, BorderType, Paragraph, Widget, Wrap}};
+use ratatui_core::{buffer::Buffer, layout::{self, Constraint, Offset, Rect}, widgets::Widget};
+use ratatui_widgets::{block::Block, borders::BorderType, paragraph::{Paragraph, Wrap}};
 use yazi_core::{Core, notify::Message};
 
 pub(crate) struct Notify<'a> {
@@ -7,15 +8,6 @@ pub(crate) struct Notify<'a> {
 
 impl<'a> Notify<'a> {
 	pub(crate) fn new(core: &'a Core) -> Self { Self { core } }
-
-	pub(crate) fn available(area: Rect) -> Rect {
-		let chunks = layout::Layout::horizontal([Constraint::Fill(1), Constraint::Min(80)]).split(area);
-
-		let chunks =
-			layout::Layout::vertical([Constraint::Fill(1), Constraint::Max(1)]).split(chunks[1]);
-
-		chunks[0]
-	}
 
 	fn tiles<'m>(area: Rect, messages: impl Iterator<Item = &'m Message> + Clone) -> Vec<Rect> {
 		layout::Layout::vertical(
@@ -29,9 +21,9 @@ impl<'a> Notify<'a> {
 		.skip(1)
 		.zip(messages)
 		.map(|(&(mut r), m)| {
-			if r.width > m.max_width as u16 {
-				r.x = r.x.saturating_add(r.width - m.max_width as u16);
-				r.width = m.max_width as u16;
+			let w = m.width() as u16;
+			if let Some(sub) = r.width.checked_sub(w) {
+				(r.x, r.width) = (r.x.saturating_add(sub), w);
 			}
 			r
 		})
@@ -42,7 +34,7 @@ impl<'a> Notify<'a> {
 impl Widget for Notify<'_> {
 	fn render(self, area: Rect, buf: &mut Buffer) {
 		let notify = &self.core.notify;
-		let available = Self::available(area);
+		let available = yazi_core::notify::Notify::available(area);
 
 		let messages = notify.messages.iter().take(notify.limit(available)).rev();
 		let tiles = Self::tiles(available, messages.clone());
@@ -52,7 +44,7 @@ impl Widget for Notify<'_> {
 				tiles[i].offset(Offset { x: (100 - m.percent) as i32 * tiles[i].width as i32 / 100, y: 0 });
 			rect.width -= rect.x - tiles[i].x;
 
-			yazi_binding::elements::Clear::default().render(rect, buf);
+			yazi_widgets::clear::Clear::default().render(rect, buf);
 			Paragraph::new(m.content.as_str())
 				.wrap(Wrap { trim: false })
 				.block(

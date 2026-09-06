@@ -1,164 +1,118 @@
-use std::{fs::{FileType, Metadata}, time::SystemTime};
+use std::{fs::Metadata, ops::Deref, time::{Duration, SystemTime, UNIX_EPOCH}};
 
+use anyhow::bail;
+use mlua::FromLua;
+use serde::{Deserialize, Serialize};
 use yazi_macro::{unix_either, win_either};
-use yazi_shared::url::{Url, UrlBuf};
+use yazi_shared::{strand::AsStrand, url::AsUrl};
 
 use super::ChaKind;
-use crate::provider;
+use crate::cha::{ChaMode, ChaType};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, FromLua, PartialEq, Serialize)]
 pub struct Cha {
 	pub kind:  ChaKind,
+	pub mode:  ChaMode,
 	pub len:   u64,
 	pub atime: Option<SystemTime>,
 	pub btime: Option<SystemTime>,
-	#[cfg(unix)]
 	pub ctime: Option<SystemTime>,
 	pub mtime: Option<SystemTime>,
-	#[cfg(unix)]
-	pub mode:  libc::mode_t,
-	#[cfg(unix)]
-	pub dev:   libc::dev_t,
-	#[cfg(unix)]
-	pub uid:   libc::uid_t,
-	#[cfg(unix)]
-	pub gid:   libc::gid_t,
-	#[cfg(unix)]
-	pub nlink: libc::nlink_t,
+	pub dev:   u64,
+	pub uid:   u32,
+	pub gid:   u32,
+	pub nlink: u64,
+}
+
+impl Deref for Cha {
+	type Target = ChaMode;
+
+	fn deref(&self) -> &Self::Target { &self.mode }
 }
 
 impl Default for Cha {
 	fn default() -> Self {
 		Self {
-			kind:               ChaKind::DUMMY,
-			len:                0,
-			atime:              None,
-			btime:              None,
-			#[cfg(unix)]
-			ctime:              None,
-			mtime:              None,
-			#[cfg(unix)]
-			mode:               0,
-			#[cfg(unix)]
-			dev:                0,
-			#[cfg(unix)]
-			uid:                0,
-			#[cfg(unix)]
-			gid:                0,
-			#[cfg(unix)]
-			nlink:              0,
+			kind:  ChaKind::DUMMY,
+			mode:  ChaMode::empty(),
+			len:   0,
+			atime: None,
+			btime: None,
+			ctime: None,
+			mtime: None,
+			dev:   0,
+			uid:   0,
+			gid:   0,
+			nlink: 0,
 		}
 	}
 }
 
 impl Cha {
 	#[inline]
-	pub fn new<'a>(url: impl Into<Url<'a>>, meta: Metadata) -> Self {
-		Self::from_just_meta(&meta).attach(ChaKind::hidden(url, &meta))
+	pub fn new<T>(name: T, meta: Metadata) -> Self
+	where
+		T: AsStrand,
+	{
+		Self::from_bare(&meta).attach(ChaKind::hidden(name, &meta) | ChaKind::reparse(&meta))
 	}
 
-	#[inline]
-	pub async fn from_url<'a>(url: impl Into<Url<'a>>) -> std::io::Result<Self> {
-		let url = url.into();
-		Ok(Self::from_follow(url, provider::symlink_metadata(url).await?).await)
-	}
-
-	pub async fn from_follow<'a>(url: impl Into<Url<'a>>, mut meta: Metadata) -> Self {
-		let url = url.into();
-		let mut attached = ChaKind::hidden(url, &meta);
-
-		if meta.is_symlink() {
-			attached |= ChaKind::LINK;
-			meta = provider::metadata(url).await.unwrap_or(meta);
-		}
-		if meta.is_symlink() {
-			attached |= ChaKind::ORPHAN;
-		}
-
-		Self::from_just_meta(&meta).attach(attached)
-	}
-
-	#[inline]
-	pub fn from_dummy(_url: &UrlBuf, ft: Option<FileType>) -> Self {
-		let mut me = ft.map(Self::from_half_ft).unwrap_or_default();
-		#[cfg(unix)]
-		if _url.urn().is_hidden() {
-			me.kind |= ChaKind::HIDDEN;
-		}
-		me
-	}
-
-	fn from_half_ft(ft: FileType) -> Self {
+	pub(crate) fn from_dummy<U>(_url: U, r#type: Option<ChaType>) -> Self
+	where
+		U: AsUrl,
+	{
+		#[allow(unused_mut)]
 		let mut kind = ChaKind::DUMMY;
+		let mode = r#type.map(ChaMode::from_bare).unwrap_or_default();
+
+		#[cfg(unix)]
+		if _url.as_url().urn().is_hidden() {
+			kind |= ChaKind::HIDDEN;
+		}
+
+		Self { kind, mode, ..Default::default() }
+	}
+
+	fn from_bare(m: &Metadata) -> Self {
+		#[cfg(unix)]
+		use std::os::unix::fs::MetadataExt;
 
 		#[cfg(unix)]
 		let mode = {
-			use std::os::unix::fs::FileTypeExt;
-			if ft.is_dir() {
-				kind |= ChaKind::DIR;
-				libc::S_IFDIR
-			} else if ft.is_symlink() {
-				kind |= ChaKind::LINK;
-				libc::S_IFLNK
-			} else if ft.is_block_device() {
-				libc::S_IFBLK
-			} else if ft.is_char_device() {
-				libc::S_IFCHR
-			} else if ft.is_fifo() {
-				libc::S_IFIFO
-			} else if ft.is_socket() {
-				libc::S_IFSOCK
-			} else {
-				0
-			}
+			use std::os::unix::fs::PermissionsExt;
+			ChaMode::from_bits_retain(m.permissions().mode() as u16)
 		};
 
 		#[cfg(windows)]
-		{
-			if ft.is_dir() {
-				kind |= ChaKind::DIR;
-			} else if ft.is_symlink() {
-				kind |= ChaKind::LINK;
-			}
-		}
-
-		Self {
-			kind,
-			#[cfg(unix)]
-			mode,
-			..Default::default()
-		}
-	}
-
-	fn from_just_meta(m: &Metadata) -> Self {
-		#[cfg(unix)]
-		use std::{os::unix::{fs::MetadataExt, prelude::PermissionsExt}, time::{Duration, UNIX_EPOCH}};
-
-		let mut kind = ChaKind::empty();
-		if m.is_dir() {
-			kind |= ChaKind::DIR;
+		let mut mode = if m.is_file() {
+			ChaMode::T_FILE
+		} else if m.is_dir() {
+			ChaMode::T_DIR
 		} else if m.is_symlink() {
-			kind |= ChaKind::LINK;
+			ChaMode::T_LINK
+		} else {
+			ChaMode::empty()
+		};
+		#[cfg(windows)]
+		if !m.permissions().readonly() {
+			mode |= ChaMode::U_WRITE;
 		}
 
 		Self {
-			kind,
+			kind: ChaKind::empty(),
+			mode,
 			len: m.len(),
 			atime: m.accessed().ok(),
 			btime: m.created().ok(),
-			#[cfg(unix)]
-			ctime: UNIX_EPOCH.checked_add(Duration::new(m.ctime() as u64, m.ctime_nsec() as u32)),
+			ctime: unix_either!(
+				UNIX_EPOCH.checked_add(Duration::new(m.ctime() as u64, m.ctime_nsec() as u32)),
+				None
+			),
 			mtime: m.modified().ok(),
-			#[cfg(unix)]
-			mode: m.permissions().mode() as _,
-			#[cfg(unix)]
-			dev: m.dev() as _,
-			#[cfg(unix)]
-			uid: m.uid() as _,
-			#[cfg(unix)]
-			gid: m.gid() as _,
-			#[cfg(unix)]
-			nlink: m.nlink() as _,
+			dev: unix_either!(m.dev(), 0) as _,
+			uid: unix_either!(m.uid(), 0) as _,
+			gid: unix_either!(m.gid(), 0) as _,
+			nlink: unix_either!(m.nlink(), 0) as _,
 		}
 	}
 
@@ -166,10 +120,10 @@ impl Cha {
 	pub fn hits(self, c: Self) -> bool {
 		self.len == c.len
 			&& self.mtime == c.mtime
-			&& unix_either!(self.ctime == c.ctime, true)
+			&& self.ctime == c.ctime
 			&& self.btime == c.btime
 			&& self.kind == c.kind
-			&& unix_either!(self.mode == c.mode, true)
+			&& self.mode == c.mode
 	}
 
 	#[inline]
@@ -177,14 +131,31 @@ impl Cha {
 		self.kind |= kind;
 		self
 	}
+
+	#[inline]
+	pub fn follow(self, followed: Option<Self>) -> Self {
+		if !self.is_link() {
+			return self;
+		}
+
+		let retain = self.kind & (ChaKind::HIDDEN | ChaKind::SYSTEM | ChaKind::REPARSE);
+		followed.unwrap_or(self).attach(retain | ChaKind::FOLLOW)
+	}
 }
 
 impl Cha {
 	#[inline]
-	pub const fn is_dir(&self) -> bool { self.kind.contains(ChaKind::DIR) }
+	pub fn is_link(self) -> bool {
+		self.kind.contains(ChaKind::FOLLOW) || *self.mode == ChaType::Link
+	}
 
 	#[inline]
-	pub const fn is_hidden(&self) -> bool {
+	pub fn is_orphan(self) -> bool {
+		*self.mode == ChaType::Link && self.kind.contains(ChaKind::FOLLOW)
+	}
+
+	#[inline]
+	pub const fn is_hidden(self) -> bool {
 		win_either!(
 			self.kind.contains(ChaKind::HIDDEN) || self.kind.contains(ChaKind::SYSTEM),
 			self.kind.contains(ChaKind::HIDDEN)
@@ -192,37 +163,43 @@ impl Cha {
 	}
 
 	#[inline]
-	pub const fn is_link(&self) -> bool { self.kind.contains(ChaKind::LINK) }
+	pub const fn is_dummy(self) -> bool { self.kind.contains(ChaKind::DUMMY) }
 
 	#[inline]
-	pub const fn is_orphan(&self) -> bool { self.kind.contains(ChaKind::ORPHAN) }
+	const fn is_reparse(self) -> bool { self.kind.contains(ChaKind::REPARSE) }
 
 	#[inline]
-	pub const fn is_dummy(&self) -> bool { self.kind.contains(ChaKind::DUMMY) }
+	pub fn is_indirect(self) -> bool { self.is_link() || self.is_reparse() }
 
-	#[inline]
-	pub const fn is_block(&self) -> bool {
-		unix_either!(self.mode & libc::S_IFMT == libc::S_IFBLK, false)
+	pub(crate) fn atime_dur(self) -> anyhow::Result<Duration> {
+		if let Some(atime) = self.atime {
+			Ok(atime.duration_since(UNIX_EPOCH)?)
+		} else {
+			bail!("atime not available");
+		}
 	}
 
-	#[inline]
-	pub const fn is_char(&self) -> bool {
-		unix_either!(self.mode & libc::S_IFMT == libc::S_IFCHR, false)
+	pub(crate) fn btime_dur(self) -> anyhow::Result<Duration> {
+		if let Some(btime) = self.btime {
+			Ok(btime.duration_since(UNIX_EPOCH)?)
+		} else {
+			bail!("btime not available");
+		}
 	}
 
-	#[inline]
-	pub const fn is_fifo(&self) -> bool {
-		unix_either!(self.mode & libc::S_IFMT == libc::S_IFIFO, false)
+	pub(crate) fn ctime_dur(self) -> anyhow::Result<Duration> {
+		if let Some(ctime) = self.ctime {
+			Ok(ctime.duration_since(UNIX_EPOCH)?)
+		} else {
+			bail!("ctime not available");
+		}
 	}
 
-	#[inline]
-	pub const fn is_sock(&self) -> bool {
-		unix_either!(self.mode & libc::S_IFMT == libc::S_IFSOCK, false)
+	pub fn mtime_dur(self) -> anyhow::Result<Duration> {
+		if let Some(mtime) = self.mtime {
+			Ok(mtime.duration_since(UNIX_EPOCH)?)
+		} else {
+			bail!("mtime not available");
+		}
 	}
-
-	#[inline]
-	pub const fn is_exec(&self) -> bool { unix_either!(self.mode & libc::S_IXUSR != 0, false) }
-
-	#[inline]
-	pub const fn is_sticky(&self) -> bool { unix_either!(self.mode & libc::S_ISVTX != 0, false) }
 }

@@ -1,80 +1,109 @@
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use tokio::{pin, select, sync::mpsc};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
-use tokio_util::sync::CancellationToken;
-use yazi_macro::err;
-use yazi_shared::{RoCell, url::UrlBuf};
+use yazi_macro::log_if_err;
+use yazi_shared::url::UrlBuf;
+use yazi_shim::cell::RoCell;
 
-use crate::{Pubsub, ember::BodyMoveItem};
+use crate::{Pubsub, ember::{EmberDuplicateItem, EmberMoveItem}};
 
-static CT: RoCell<CancellationToken> = RoCell::new();
-static MOVE_TX: Mutex<Option<mpsc::UnboundedSender<BodyMoveItem>>> = Mutex::new(None);
-static TRASH_TX: Mutex<Option<mpsc::UnboundedSender<UrlBuf>>> = Mutex::new(None);
-static DELETE_TX: Mutex<Option<mpsc::UnboundedSender<UrlBuf>>> = Mutex::new(None);
+static DUPLICATE_TX: RoCell<mpsc::UnboundedSender<EmberDuplicateItem>> = RoCell::new();
+static MOVE_TX: RoCell<mpsc::UnboundedSender<EmberMoveItem>> = RoCell::new();
+static TRASH_TX: RoCell<mpsc::UnboundedSender<UrlBuf>> = RoCell::new();
+static DELETE_TX: RoCell<mpsc::UnboundedSender<UrlBuf>> = RoCell::new();
+static DOWNLOAD_TX: RoCell<mpsc::UnboundedSender<UrlBuf>> = RoCell::new();
+static SHUTDOWN_TX: RoCell<mpsc::UnboundedSender<()>> = RoCell::new();
 
 pub struct Pump;
 
 impl Pump {
-	pub fn push_move(from: UrlBuf, to: UrlBuf) {
-		if let Some(tx) = &*MOVE_TX.lock() {
-			tx.send(BodyMoveItem { from, to }).ok();
-		}
+	pub fn push_duplicate<U>(from: U, to: U)
+	where
+		U: Into<UrlBuf>,
+	{
+		DUPLICATE_TX.send(EmberDuplicateItem { from: from.into(), to: to.into() }).ok();
 	}
 
-	pub fn push_trash(target: UrlBuf) {
-		if let Some(tx) = &*TRASH_TX.lock() {
-			tx.send(target).ok();
-		}
+	pub fn push_move<U>(from: U, to: U)
+	where
+		U: Into<UrlBuf>,
+	{
+		MOVE_TX.send(EmberMoveItem { from: from.into(), to: to.into() }).ok();
 	}
 
-	pub fn push_delete(target: UrlBuf) {
-		if let Some(tx) = &*DELETE_TX.lock() {
-			tx.send(target).ok();
-		}
+	pub fn push_trash<U>(target: U)
+	where
+		U: Into<UrlBuf>,
+	{
+		TRASH_TX.send(target.into()).ok();
+	}
+
+	pub fn push_delete<U>(target: U)
+	where
+		U: Into<UrlBuf>,
+	{
+		DELETE_TX.send(target.into()).ok();
+	}
+
+	pub fn push_download<U>(target: U)
+	where
+		U: Into<UrlBuf>,
+	{
+		DOWNLOAD_TX.send(target.into()).ok();
 	}
 
 	pub(super) fn serve() {
 		let (move_tx, move_rx) = mpsc::unbounded_channel();
+		let (duplicate_tx, duplicate_rx) = mpsc::unbounded_channel();
 		let (trash_tx, trash_rx) = mpsc::unbounded_channel();
 		let (delete_tx, delete_rx) = mpsc::unbounded_channel();
+		let (download_tx, download_rx) = mpsc::unbounded_channel();
+		let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
 
-		CT.with(<_>::default);
-		MOVE_TX.lock().replace(move_tx);
-		TRASH_TX.lock().replace(trash_tx);
-		DELETE_TX.lock().replace(delete_tx);
+		DUPLICATE_TX.init(duplicate_tx);
+		MOVE_TX.init(move_tx);
+		TRASH_TX.init(trash_tx);
+		DELETE_TX.init(delete_tx);
+		DOWNLOAD_TX.init(download_tx);
+		SHUTDOWN_TX.init(shutdown_tx);
 
 		tokio::spawn(async move {
+			let duplicate_rx =
+				UnboundedReceiverStream::new(duplicate_rx).chunks_timeout(1000, Duration::from_millis(500));
 			let move_rx =
 				UnboundedReceiverStream::new(move_rx).chunks_timeout(1000, Duration::from_millis(500));
 			let trash_rx =
 				UnboundedReceiverStream::new(trash_rx).chunks_timeout(1000, Duration::from_millis(500));
 			let delete_rx =
 				UnboundedReceiverStream::new(delete_rx).chunks_timeout(1000, Duration::from_millis(500));
+			let download_rx =
+				UnboundedReceiverStream::new(download_rx).chunks_timeout(1000, Duration::from_millis(500));
 
+			pin!(duplicate_rx);
 			pin!(move_rx);
 			pin!(trash_rx);
 			pin!(delete_rx);
+			pin!(download_rx);
 
 			loop {
 				select! {
-					Some(items) = move_rx.next() => err!(Pubsub::pub_after_move(items)),
-					Some(urls) = trash_rx.next() => err!(Pubsub::pub_after_trash(urls)),
-					Some(urls) = delete_rx.next() => err!(Pubsub::pub_after_delete(urls)),
-					else => {
-						CT.cancel();
+					Some(items) = duplicate_rx.next() => log_if_err!(Pubsub::pub_after_duplicate(items)),
+					Some(items) = move_rx.next() => log_if_err!(Pubsub::pub_after_move(items)),
+					Some(urls) = trash_rx.next() => log_if_err!(Pubsub::pub_after_trash(urls)),
+					Some(urls) = delete_rx.next() => log_if_err!(Pubsub::pub_after_delete(urls)),
+					Some(urls) = download_rx.next() => log_if_err!(Pubsub::pub_after_download(urls)),
+					_ = shutdown_rx.recv() => {
+						shutdown_rx.close();
 						break;
-					},
+					}
 				}
 			}
 		});
 	}
 
 	pub(super) async fn shutdown() {
-		drop(MOVE_TX.lock().take());
-		drop(TRASH_TX.lock().take());
-		drop(DELETE_TX.lock().take());
-		CT.cancelled().await;
+		SHUTDOWN_TX.send(()).ok();
+		SHUTDOWN_TX.closed().await;
 	}
 }

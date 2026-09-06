@@ -6,19 +6,19 @@ use super::{InputMode, InputOp};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InputSnap {
-	pub value: String,
+	pub(crate) value: String,
 
 	pub op: InputOp,
 
-	pub mode:    InputMode,
-	pub obscure: bool,
+	pub mode:           InputMode,
+	pub(crate) obscure: bool,
 
-	pub offset: usize,
-	pub cursor: usize,
+	pub(crate) offset: usize,
+	pub(crate) cursor: usize,
 }
 
 impl InputSnap {
-	pub(super) fn new(value: String, obscure: bool, limit: usize) -> Self {
+	pub(super) fn new(value: String, obscure: bool) -> Self {
 		let mut snap = Self {
 			value,
 
@@ -30,11 +30,10 @@ impl InputSnap {
 			offset: 0,
 			cursor: usize::MAX,
 		};
-		snap.resize(limit);
+		snap.resize(0);
 		snap
 	}
 
-	#[inline]
 	pub(super) fn resize(&mut self, limit: usize) {
 		let count = self.count();
 		let limit = if self.obscure {
@@ -53,13 +52,10 @@ impl InputSnap {
 }
 
 impl InputSnap {
-	#[inline]
 	pub(super) fn len(&self) -> usize { self.value.len() }
 
-	#[inline]
 	pub(super) fn count(&self) -> usize { self.value.chars().count() }
 
-	#[inline]
 	pub(super) fn idx(&self, n: usize) -> Option<usize> {
 		self
 			.value
@@ -69,18 +65,15 @@ impl InputSnap {
 			.or_else(|| if n == self.count() { Some(self.len()) } else { None })
 	}
 
-	#[inline]
 	pub(super) fn slice(&self, range: Range<usize>) -> &str {
 		let (s, e) = (self.idx(range.start), self.idx(range.end));
 		&self.value[s.unwrap()..e.unwrap()]
 	}
 
-	#[inline]
 	pub(super) fn width(&self, range: Range<usize>) -> u16 {
 		if self.obscure { range.len() as u16 } else { self.slice(range).width() as u16 }
 	}
 
-	#[inline]
 	pub(super) fn window(&self, limit: usize) -> Range<usize> {
 		Self::find_window(
 			self.value.chars().map(|c| if self.obscure { '•' } else { c }),

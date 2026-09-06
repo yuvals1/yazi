@@ -1,18 +1,21 @@
-use std::{borrow::Cow, ffi::{OsStr, OsString}, hash::Hash, io::{Read, Write}, ops::Deref, path::Path};
+use std::{hash::Hash, io::{Read, Write}, ops::Deref, path::Path};
 
 use anyhow::{Result, anyhow};
-use crossterm::{execute, style::Print};
 use hashbrown::HashMap;
 use scopeguard::defer;
 use tokio::io::AsyncWriteExt;
-use yazi_config::{YAZI, opener::OpenerRule};
+use yazi_binding::Permit;
+use yazi_config::{YAZI, opener::OpenerRuleArc};
 use yazi_dds::Pubsub;
-use yazi_fs::{File, FilesOp, max_common_root, maybe_exists, path::skip_url, provider::{self, local::{Gate, Local}}};
-use yazi_macro::{err, succ};
-use yazi_parser::VoidOpt;
-use yazi_proxy::{AppProxy, HIDER, TasksProxy};
-use yazi_shared::{OsStrJoin, event::Data, terminal_clear, url::{Component, UrlBuf}};
-use yazi_term::tty::TTY;
+use yazi_fs::{FilesOp, Splatter, engine::{Engine, FileBuilder, local::Local}, max_common_root, path::skip_url};
+use yazi_macro::{log_if_err, succ, writef};
+use yazi_parser::VoidForm;
+use yazi_proxy::TasksProxy;
+use yazi_scheduler::{AppProxy, NotifyProxy, process::ShellOpt};
+use yazi_shared::{data::Data, path::PathDyn, strand::{AsStrand, AsStrandJoin, Strand, StrandBuf, StrandLike}, url::{AsUrl, UrlBuf, UrlLike}};
+use yazi_term::YIELD_TO_SUBPROCESS;
+use yazi_tty::{TTY, sequence::EraseDisplay};
+use yazi_vfs::{engine::{self, Demand}, maybe_exists};
 use yazi_watcher::WATCHER;
 
 use crate::{Actor, Ctx};
@@ -20,18 +23,18 @@ use crate::{Actor, Ctx};
 pub struct BulkRename;
 
 impl Actor for BulkRename {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "bulk_rename";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		let Some(opener) = Self::opener() else {
-			succ!(AppProxy::notify_warn("Bulk rename", "No text opener found"));
+			succ!(NotifyProxy::push_warn("Bulk rename", "No text opener found"));
 		};
 
-		let selected: Vec<_> = cx.tab().selected_or_hovered().cloned().collect();
+		let selected: Vec<_> = cx.tab().selected_or_hovered_urls().cloned().collect();
 		if selected.is_empty() {
-			succ!(AppProxy::notify_warn("Bulk rename", "No files selected"));
+			succ!(NotifyProxy::push_warn("Bulk rename", "No files selected"));
 		}
 
 		let root = max_common_root(&selected);
@@ -39,28 +42,35 @@ impl Actor for BulkRename {
 			selected.iter().enumerate().map(|(i, u)| Tuple::new(i, skip_url(u, root))).collect();
 
 		let cwd = cx.cwd().clone();
+		let batcher = cx.core.mgr.batcher.clone();
 		tokio::spawn(async move {
-			let tmp = YAZI.preview.tmpfile("bulk");
-			Gate::default()
-				.write(true)
-				.create_new(true)
-				.open(&tmp)
-				.await?
-				.write_all(old.join(OsStr::new("\n")).as_encoded_bytes())
-				.await?;
+			let tmp = YAZI.preview.tmpfile("bulk-rename");
 
-			defer! { tokio::spawn(Local::remove_file(tmp.clone())); }
-			TasksProxy::process_exec(Cow::Borrowed(opener), cwd, vec![
-				OsString::new(),
-				tmp.to_owned().into(),
-			])
+			let mut rw = Demand::default().write(true).create_new(true).open(&tmp).await?;
+			rw.write_all(old.join(Strand::Utf8("\n")).encoded_bytes()).await?;
+
+			defer! {
+				let tmp = tmp.clone();
+				batcher.drain(&tmp);
+				tokio::spawn(async move {
+					Local::regular(&tmp).remove_file().await
+				});
+			}
+
+			batcher.prime(&tmp);
+			TasksProxy::process_exec(ShellOpt {
+				cwd,
+				cmd: Splatter::new(&[rw.into_file().await?]).splat(&opener.run),
+				block: opener.block,
+				orphan: opener.orphan,
+			})
 			.await;
 
-			let _permit = HIDER.acquire().await.unwrap();
-			defer!(AppProxy::resume());
+			let _permit = Permit::new(YIELD_TO_SUBPROCESS.acquire().await.unwrap(), AppProxy::resume());
 			AppProxy::stop().await;
 
-			let new: Vec<_> = Local::read_to_string(&tmp)
+			let new: Vec<_> = Local::regular(&tmp)
+				.read_to_string()
 				.await?
 				.lines()
 				.take(old.len())
@@ -68,7 +78,8 @@ impl Actor for BulkRename {
 				.map(|(i, s)| Tuple::new(i, s))
 				.collect();
 
-			Self::r#do(root, old, new, selected).await
+			let decision = batcher.drain(&tmp);
+			Self::r#do(root, old, new, selected, decision).await
 		});
 		succ!();
 	}
@@ -80,12 +91,12 @@ impl BulkRename {
 		old: Vec<Tuple>,
 		new: Vec<Tuple>,
 		selected: Vec<UrlBuf>,
+		decision: Option<bool>,
 	) -> Result<()> {
-		terminal_clear(TTY.writer())?;
+		writef!(TTY.writer(), "{}\n", EraseDisplay::All)?;
 		if old.len() != new.len() {
 			#[rustfmt::skip]
-			let s = format!("Number of new and old file names mismatch (New: {}, Old: {}).\nPress <Enter> to exit...", new.len(), old.len());
-			execute!(TTY.writer(), Print(s))?;
+			writef!(TTY.writer(), "Number of new and old file names mismatch (New: {}, Old: {}).\nPress <Enter> to exit...", new.len(), old.len())?;
 
 			TTY.reader().read_exact(&mut [0])?;
 			return Ok(());
@@ -97,34 +108,25 @@ impl BulkRename {
 			return Ok(());
 		}
 
-		{
-			let mut w = TTY.lockout();
-			for (old, new) in &todo {
-				writeln!(w, "{} -> {}", old.display(), new.display())?;
-			}
-			write!(w, "Continue to rename? (y/N): ")?;
-			w.flush()?;
-		}
-
-		let mut buf = [0; 10];
-		_ = TTY.reader().read(&mut buf)?;
-		if buf[0] != b'y' && buf[0] != b'Y' {
+		if !Self::ask_continue(&todo, decision)? {
 			return Ok(());
 		}
 
 		let permit = WATCHER.acquire().await.unwrap();
 		let (mut failed, mut succeeded) = (Vec::new(), HashMap::with_capacity(todo.len()));
 		for (o, n) in todo {
-			let (old, new): (UrlBuf, UrlBuf) = (
-				selected[o.0].components().take(root).chain([Component::Normal(&o)]).collect(),
-				selected[n.0].components().take(root).chain([Component::Normal(&n)]).collect(),
-			);
+			let (Ok(old), Ok(new)) =
+				(Self::replace_url(&selected[o.0], root, &o), Self::replace_url(&selected[n.0], root, &n))
+			else {
+				failed.push((o, n, anyhow!("Invalid new or old file name")));
+				continue;
+			};
 
-			if maybe_exists(&new).await && !provider::must_identical(&old, &new).await {
+			if maybe_exists(&new).await && !engine::must_identical(&old, &new).await {
 				failed.push((o, n, anyhow!("Destination already exists")));
-			} else if let Err(e) = provider::rename(&old, &new).await {
+			} else if let Err(e) = engine::rename(&old, &new).await {
 				failed.push((o, n, e.into()));
-			} else if let Ok(f) = File::new(new).await {
+			} else if let Ok(f) = engine::file(new).await {
 				succeeded.insert(old, f);
 			} else {
 				failed.push((o, n, anyhow!("Failed to retrieve file info")));
@@ -132,8 +134,8 @@ impl BulkRename {
 		}
 
 		if !succeeded.is_empty() {
-			let it = succeeded.iter().map(|(o, n)| (o, &n.url));
-			err!(Pubsub::pub_after_bulk(it));
+			let it = succeeded.iter().map(|(o, n)| (o.as_url(), n.url.as_url()));
+			log_if_err!(Pubsub::pub_after_bulk_rename(it));
 			FilesOp::rename(succeeded);
 		}
 		drop(permit);
@@ -144,13 +146,39 @@ impl BulkRename {
 		Ok(())
 	}
 
-	fn opener() -> Option<&'static OpenerRule> {
-		YAZI.opener.block(YAZI.open.all(UrlBuf::from(Path::new("bulk-rename.txt")), "text/plain"))
+	fn opener() -> Option<OpenerRuleArc> {
+		YAZI
+			.open
+			.match_dummy(Path::new("bulk-rename.txt"), "text/plain")
+			.and_then(|r| YAZI.opener.block(&r))
+	}
+
+	fn replace_url(url: &UrlBuf, take: usize, rep: &StrandBuf) -> Result<UrlBuf> {
+		Ok(url.try_replace(take, PathDyn::with(url.kind(), rep)?)?.into_owned())
+	}
+
+	fn ask_continue(todo: &[(Tuple, Tuple)], decision: Option<bool>) -> Result<bool> {
+		if let Some(decision) = decision {
+			return Ok(decision);
+		}
+
+		{
+			let mut w = TTY.lockout();
+			for (old, new) in todo {
+				writeln!(w, "{} -> {}", old.display(), new.display())?;
+			}
+			write!(w, "Continue to rename? (y/N): ")?;
+			w.flush()?;
+		}
+
+		let mut buf = [0; 10];
+		_ = TTY.reader().read(&mut buf)?;
+		Ok(buf[0] == b'y' || buf[0] == b'Y')
 	}
 
 	async fn output_failed(failed: Vec<(Tuple, Tuple, anyhow::Error)>) -> Result<()> {
 		let mut stdout = TTY.lockout();
-		terminal_clear(&mut *stdout)?;
+		writeln!(stdout, "{}", EraseDisplay::All)?;
 
 		writeln!(stdout, "Failed to rename:")?;
 		for (old, new, err) in failed {
@@ -204,10 +232,10 @@ impl BulkRename {
 
 // --- Tuple
 #[derive(Clone, Debug)]
-struct Tuple(usize, OsString);
+struct Tuple(usize, StrandBuf);
 
 impl Deref for Tuple {
-	type Target = OsStr;
+	type Target = StrandBuf;
 
 	fn deref(&self) -> &Self::Target { &self.1 }
 }
@@ -222,12 +250,12 @@ impl Hash for Tuple {
 	fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.1.hash(state); }
 }
 
-impl AsRef<OsStr> for Tuple {
-	fn as_ref(&self) -> &OsStr { &self.1 }
+impl AsStrand for &Tuple {
+	fn as_strand(&self) -> Strand<'_> { self.1.as_strand() }
 }
 
 impl Tuple {
-	fn new(index: usize, inner: impl Into<OsString>) -> Self { Self(index, inner.into()) }
+	fn new(index: usize, inner: impl Into<StrandBuf>) -> Self { Self(index, inner.into()) }
 }
 
 // --- Tests

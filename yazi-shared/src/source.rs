@@ -6,13 +6,10 @@ pub enum Source {
 	Unknown,
 
 	Key,
-	Ind,
-
 	Emit,
-	EmitInd,
-
 	Relay,
-	RelayInd,
+
+	Ind,
 }
 
 impl Source {

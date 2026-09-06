@@ -3,13 +3,13 @@ use serde::{Deserialize, Serialize};
 
 use super::Ember;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmberMount;
 
 impl EmberMount {
-	pub fn owned() -> Ember<'static> { Self.into() }
+	pub(crate) fn borrowed() -> Ember<'static> { Self.into() }
 
-	pub fn borrowed() -> Ember<'static> { Self::owned() }
+	pub(crate) fn owned() -> Ember<'static> { Self::borrowed() }
 }
 
 impl From<EmberMount> for Ember<'_> {

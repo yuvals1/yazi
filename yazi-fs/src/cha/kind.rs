@@ -1,31 +1,33 @@
 use std::fs::Metadata;
 
 use bitflags::bitflags;
-use yazi_shared::url::Url;
+use serde::{Deserialize, Serialize};
+use yazi_shared::strand::AsStrand;
 
 bitflags! {
-	#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+	#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 	pub struct ChaKind: u8 {
-		const DIR    = 0b00000001;
-
-		const HIDDEN = 0b00000010;
-		const LINK   = 0b00000100;
-		const ORPHAN = 0b00001000;
-
-		const DUMMY  = 0b00010000;
-		#[cfg(windows)]
-		const SYSTEM = 0b00100000;
+		const FOLLOW  = 0b0000_0001;
+		const HIDDEN  = 0b0000_0010;
+		const SYSTEM  = 0b0000_0100;
+		const DUMMY   = 0b0000_1000;
+		const REPARSE = 0b0001_0000;
 	}
 }
 
 impl ChaKind {
 	#[inline]
-	pub(super) fn hidden<'a>(_url: impl Into<Url<'a>>, _meta: &Metadata) -> Self {
+	pub(super) fn hidden<T>(_name: T, _meta: &Metadata) -> Self
+	where
+		T: AsStrand,
+	{
 		let mut me = Self::empty();
 
 		#[cfg(unix)]
-		if _url.into().urn().is_hidden() {
-			me |= Self::HIDDEN;
+		{
+			if _name.as_strand().starts_with(".") {
+				me |= Self::HIDDEN;
+			}
 		}
 		#[cfg(windows)]
 		{
@@ -41,5 +43,21 @@ impl ChaKind {
 		}
 
 		me
+	}
+
+	#[inline]
+	pub(super) fn reparse(_meta: &Metadata) -> Self {
+		#[cfg(windows)]
+		{
+			use std::os::windows::fs::MetadataExt;
+
+			use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+			if _meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+				return Self::REPARSE;
+			}
+		}
+
+		Self::empty()
 	}
 }

@@ -1,87 +1,29 @@
-use mlua::{Function, Lua, Table};
+use std::borrow::Cow;
+
+use base64::{Engine, engine::general_purpose::STANDARD_PAD_INDIFFERENT};
+use mlua::{BorrowedBytes, ExternalError, Function, IntoLuaMulti, Lua, LuaString, Value};
 use twox_hash::XxHash3_128;
-use unicode_width::UnicodeWidthChar;
-use yazi_binding::deprecate;
+use yazi_shim::RFC_3986;
 use yazi_widgets::CLIPBOARD;
 
 use super::Utils;
 
 impl Utils {
 	pub(super) fn hash(lua: &Lua) -> mlua::Result<Function> {
-		lua.create_async_function(move |_, s: mlua::String| async move {
+		lua.create_async_function(move |_, s: LuaString| async move {
 			Ok(format!("{:x}", XxHash3_128::oneshot(&s.as_bytes())))
 		})
 	}
 
 	pub(super) fn quote(lua: &Lua) -> mlua::Result<Function> {
-		lua.create_function(|lua, (s, unix): (mlua::String, Option<bool>)| {
-			let s = s.to_str()?;
-			let s = match unix {
-				Some(true) => yazi_shared::shell::escape_unix(s.as_ref()),
-				Some(false) => yazi_shared::shell::escape_windows(s.as_ref()),
-				None => yazi_shared::shell::escape_native(s.as_ref()),
-			};
-			lua.create_string(s.as_ref())
-		})
-	}
-
-	pub(super) fn truncate(lua: &Lua) -> mlua::Result<Function> {
-		fn traverse(
-			it: impl Iterator<Item = (usize, char)>,
-			max: usize,
-		) -> (Option<usize>, usize, bool) {
-			let (mut adv, mut last) = (0, 0);
-			let idx = it
-				.take_while(|&(_, c)| {
-					(last, adv) = (adv, adv + c.width().unwrap_or(0));
-					adv <= max
-				})
-				.map(|(i, _)| i)
-				.last();
-			(idx, last, adv > max)
-		}
-
-		lua.create_function(|lua, (s, t): (mlua::String, Table)| {
-			deprecate!(lua, "`ya.truncate()` is deprecated, use `ui.truncate()` instead, in your {}\nSee #2939 for more details: https://github.com/sxyazi/yazi/pull/2939");
-
+		lua.create_function(|lua, (s, unix): (LuaString, Option<bool>)| {
 			let b = s.as_bytes();
-			if b.is_empty() {
-				return Ok(s);
-			}
-
-			let max = t.raw_get("max")?;
-			if b.len() <= max {
-				return Ok(s);
-			} else if max < 1 {
-				return lua.create_string("");
-			}
-
-			let lossy = String::from_utf8_lossy(&b);
-			let rtl = t.raw_get("rtl").unwrap_or(false);
-			let (idx, width, remain) = if rtl {
-				traverse(lossy.char_indices().rev(), max)
-			} else {
-				traverse(lossy.char_indices(), max)
+			let s = match unix {
+				Some(true) => yazi_shared::shell::unix::escape_os_bytes(&b),
+				Some(false) => yazi_shared::shell::windows::escape_os_bytes(&b),
+				None => yazi_shared::shell::escape_os_bytes(&b),
 			};
-
-			let Some(idx) = idx else { return lua.create_string("…") };
-			if !remain {
-				return Ok(s);
-			}
-
-			let result: Vec<_> = match (rtl, width == max) {
-				(false, false) => {
-					let len = lossy[idx..].chars().next().map_or(0, |c| c.len_utf8());
-					lossy[..idx + len].bytes().chain("…".bytes()).collect()
-				}
-				(false, true) => lossy[..idx].bytes().chain("…".bytes()).collect(),
-				(true, false) => "…".bytes().chain(lossy[idx..].bytes()).collect(),
-				(true, true) => {
-					let len = lossy[idx..].chars().next().map_or(0, |c| c.len_utf8());
-					"…".bytes().chain(lossy[idx + len..].bytes()).collect()
-				}
-			};
-			lua.create_string(result)
+			lua.create_external_string(s)
 		})
 	}
 
@@ -91,7 +33,34 @@ impl Utils {
 				CLIPBOARD.set(text).await;
 				Ok(None)
 			} else {
-				Some(lua.create_string(CLIPBOARD.get().await.as_encoded_bytes())).transpose()
+				Some(lua.create_external_string(CLIPBOARD.get().await)).transpose()
+			}
+		})
+	}
+
+	pub(super) fn base64_decode(lua: &Lua) -> mlua::Result<Function> {
+		lua.create_function(|lua, s: BorrowedBytes| match STANDARD_PAD_INDIFFERENT.decode(&*s) {
+			Ok(b) => lua.create_external_string(b)?.into_lua_multi(lua),
+			Err(e) => (Value::Nil, e.into_lua_err()).into_lua_multi(lua),
+		})
+	}
+
+	pub(super) fn percent_decode(lua: &Lua) -> mlua::Result<Function> {
+		lua.create_function(|lua, s: LuaString| {
+			let b = s.as_bytes();
+			match percent_encoding::percent_decode(&b).into() {
+				Cow::Borrowed(_) => Ok(s),
+				Cow::Owned(b) => lua.create_external_string(b),
+			}
+		})
+	}
+
+	pub(super) fn percent_encode(lua: &Lua) -> mlua::Result<Function> {
+		lua.create_function(|lua, s: LuaString| {
+			let b = s.as_bytes();
+			match percent_encoding::percent_encode(&b, RFC_3986).into() {
+				Cow::Borrowed(_) => Ok(s),
+				Cow::Owned(s) => lua.create_external_string(s),
 			}
 		})
 	}

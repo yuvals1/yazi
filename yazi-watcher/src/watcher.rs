@@ -1,81 +1,103 @@
-use std::time::Duration;
+use futures::{StreamExt, stream};
+use indexmap::IndexSet;
+use yazi_fs::{FsUrl, file::File};
+use yazi_macro::error;
+use yazi_shared::{LastValue, url::{UrlBuf, UrlCow, UrlLike}};
 
-use hashbrown::HashSet;
-use tokio::{pin, sync::{mpsc::{self, UnboundedReceiver}, watch}};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
-use yazi_fs::{File, FilesOp, provider::local};
-use yazi_shared::url::UrlBuf;
-
-use crate::{LINKED, Linked, WATCHED, WATCHER, backend::Backend};
+use crate::{Refresher, Reporter, WATCHED, Watchee, backend::Backend};
 
 pub struct Watcher {
-	in_tx:  watch::Sender<HashSet<UrlBuf>>,
-	out_tx: mpsc::UnboundedSender<UrlBuf>,
+	last:          LastValue<IndexSet<UrlBuf>>,
+	reporter:      Reporter,
+	pub refresher: Refresher,
 }
 
 impl Watcher {
 	pub fn serve() -> Self {
-		let (in_tx, in_rx) = watch::channel(Default::default());
-		let (out_tx, out_rx) = mpsc::unbounded_channel();
+		let last = LastValue::default();
+		let refresher = Refresher::serve();
 
-		let backend = Backend::serve(out_tx.clone());
+		let backend = Backend::serve();
+		let reporter = backend.reporter.clone();
 
-		tokio::spawn(Self::fan_in(in_rx, backend));
-		tokio::spawn(Self::fan_out(out_rx));
-
-		Self { in_tx, out_tx }
+		tokio::spawn(Self::run(last.clone(), backend));
+		Self { last, reporter, refresher }
 	}
 
-	pub fn watch<'a>(&mut self, it: impl Iterator<Item = &'a UrlBuf>) {
-		self.in_tx.send(it.filter(|u| u.is_regular()).cloned().collect()).ok();
+	pub fn watch<I>(&mut self, files: I)
+	where
+		I: IntoIterator,
+		I::Item: Into<File>,
+	{
+		let it = files.into_iter();
+		let mut urls = IndexSet::with_capacity(it.size_hint().0);
+		let mut files = IndexSet::with_capacity(it.size_hint().0);
+
+		for file in it.map(Into::into) {
+			if !file.url.is_absolute() {
+				continue;
+			} else if let Some(cache) = file.url.cache_bucket() {
+				urls.insert(cache.into());
+			}
+			urls.insert(file.url.clone());
+			files.insert(file.into());
+		}
+
+		self.last.set(urls);
+		self.refresher.sync(files);
 	}
 
-	pub fn push_files(&self, urls: Vec<UrlBuf>) { Backend::push_files(&self.out_tx, urls); }
+	pub fn report<'a, I>(&self, urls: I)
+	where
+		I: IntoIterator,
+		I::Item: Into<UrlCow<'a>>,
+	{
+		self.reporter.report(urls);
+	}
 
-	async fn fan_in(mut rx: watch::Receiver<HashSet<UrlBuf>>, mut backend: Backend) {
+	async fn run(last: LastValue<IndexSet<UrlBuf>>, mut backend: Backend) {
 		loop {
-			let (to_unwatch, to_watch) = WATCHED.read().diff(&rx.borrow_and_update());
-			backend = backend.sync(to_unwatch, to_watch).await;
+			let (to_unwatch, to_watch) = Self::diff(last.get().await).await;
 
-			if !rx.has_changed().unwrap_or(false) {
-				Linked::sync(&LINKED, &WATCHED).await;
-			}
-
-			if rx.changed().await.is_err() {
-				break;
+			if !to_unwatch.is_empty() || !to_watch.is_empty() {
+				backend = Self::sync(backend, to_unwatch, to_watch).await;
+				backend = backend.sync().await;
 			}
 		}
 	}
 
-	async fn fan_out(rx: UnboundedReceiver<UrlBuf>) {
-		// TODO: revert this once a new notification is implemented
-		let rx = UnboundedReceiverStream::new(rx).chunks_timeout(1000, Duration::from_millis(250));
-		pin!(rx);
+	async fn diff(urls: IndexSet<UrlBuf>) -> (Vec<Watchee<'static>>, IndexSet<Watchee<'static>>) {
+		let mut new: IndexSet<_> = stream::iter(urls).then(Watchee::new).collect().await;
+		let old = WATCHED.read();
 
-		while let Some(chunk) = rx.next().await {
-			let urls: HashSet<_> = chunk.into_iter().collect();
+		let to_unwatch = old.difference(&new).map(Watchee::to_static).collect();
+		new.retain(|watchee| !old.contains(watchee));
 
-			let _permit = WATCHER.acquire().await.unwrap();
-			let mut ops = Vec::with_capacity(urls.len());
+		(to_unwatch, new)
+	}
 
-			for u in urls {
-				let Some((parent, urn)) = u.pair() else { continue };
-				let Ok(file) = File::new(&u).await else {
-					ops.push(FilesOp::Deleting(parent.into(), [urn.into()].into()));
-					continue;
-				};
-
-				if let Some(p) = file.url.as_path()
-					&& !local::must_case_match(p).await
-				{
-					ops.push(FilesOp::Deleting(parent.into(), [urn.into()].into()));
-					continue;
+	async fn sync(
+		mut backend: Backend,
+		to_unwatch: Vec<Watchee<'static>>,
+		to_watch: IndexSet<Watchee<'static>>,
+	) -> Backend {
+		tokio::task::spawn_blocking(move || {
+			for watchee in to_unwatch {
+				match backend.unwatch(&watchee) {
+					Ok(()) => _ = WATCHED.write().remove(&watchee),
+					Err(e) => error!("Unwatch failed: {e:?}"),
 				}
-
-				ops.push(FilesOp::Upserting(parent.into(), [(urn.into(), file)].into()));
 			}
-
-			FilesOp::mutate(ops);
-		}
+			for mut watchee in to_watch {
+				match backend.watch(&mut watchee) {
+					Ok(()) => WATCHED.write().insert(watchee),
+					Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {}
+					Err(e) => error!("Watch failed: {e:?}"),
+				}
+			}
+			backend
+		})
+		.await
+		.unwrap()
 	}
 }

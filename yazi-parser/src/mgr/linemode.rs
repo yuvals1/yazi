@@ -1,32 +1,32 @@
 use anyhow::bail;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{SStr, event::CmdCow};
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug)]
-pub struct LinemodeOpt {
-	pub new: SStr,
+#[derive(Debug, Deserialize)]
+pub struct LinemodeForm {
+	#[serde(alias = "0")]
+	pub new: String,
 }
 
-impl TryFrom<CmdCow> for LinemodeOpt {
+impl TryFrom<ActionCow> for LinemodeForm {
 	type Error = anyhow::Error;
 
-	fn try_from(mut c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(new) = c.take_first_str() else {
-			bail!("a string argument is required for LinemodeOpt");
-		};
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> {
+		let me: Self = a.deserialize()?;
 
-		if new.is_empty() || new.len() > 20 {
+		if me.new.is_empty() || me.new.len() > 20 {
 			bail!("Linemode must be between 1 and 20 characters long");
 		}
 
-		Ok(Self { new })
+		Ok(me)
 	}
 }
 
-impl FromLua for LinemodeOpt {
+impl FromLua for LinemodeForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for LinemodeOpt {
+impl IntoLua for LinemodeForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

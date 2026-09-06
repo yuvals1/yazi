@@ -1,59 +1,76 @@
-use tokio::io::{BufReader, Lines, ReadHalf, WriteHalf};
+use std::{io, path::PathBuf};
 
-pub(super) struct Stream;
+use tokio::{io::{AsyncBufReadExt, BufReader, Lines, ReadHalf, WriteHalf}, sync::OnceCell};
+use yazi_fs::{Xdg, create_owned_dir, engine::{Engine, local::Local}};
+use yazi_shim::tokio::net::{UnixStream, UnixStreamExt};
 
-use tokio::io::AsyncBufReadExt;
+pub struct Stream;
 
-#[cfg(unix)]
-pub(super) type ClientReader = Lines<BufReader<ReadHalf<tokio::net::UnixStream>>>;
-#[cfg(not(unix))]
-pub(super) type ClientReader = Lines<BufReader<ReadHalf<tokio::net::TcpStream>>>;
+pub type ClientReader = Lines<BufReader<ReadHalf<UnixStream>>>;
 
-#[cfg(unix)]
-pub(super) type ClientWriter = WriteHalf<tokio::net::UnixStream>;
-#[cfg(not(unix))]
-pub(super) type ClientWriter = WriteHalf<tokio::net::TcpStream>;
+pub(super) type ClientWriter = WriteHalf<UnixStream>;
 
 #[cfg(unix)]
 pub(super) type ServerListener = tokio::net::UnixListener;
-#[cfg(not(unix))]
-pub(super) type ServerListener = tokio::net::TcpListener;
+#[cfg(windows)]
+pub(super) type ServerListener = WinUnixListener;
 
 impl Stream {
-	#[cfg(unix)]
-	pub(super) async fn connect() -> std::io::Result<(ClientReader, ClientWriter)> {
-		let stream = tokio::net::UnixStream::connect(Self::socket_file()).await?;
-		let (reader, writer) = tokio::io::split(stream);
-		Ok((BufReader::new(reader).lines(), writer))
-	}
-
-	#[cfg(not(unix))]
-	pub(super) async fn connect() -> std::io::Result<(ClientReader, ClientWriter)> {
-		let stream = tokio::net::TcpStream::connect("127.0.0.1:33581").await?;
+	pub async fn connect() -> io::Result<(ClientReader, ClientWriter)> {
+		let stream = UnixStream::connect_uds(Self::socket_file().await?).await?;
 		let (reader, writer) = tokio::io::split(stream);
 		Ok((BufReader::new(reader).lines(), writer))
 	}
 
 	#[cfg(unix)]
-	pub(super) async fn bind() -> std::io::Result<ServerListener> {
-		let p = Self::socket_file();
+	pub(super) async fn bind() -> io::Result<ServerListener> {
+		let p = Self::socket_file().await?;
 
-		yazi_fs::provider::local::Local::remove_file(&p).await.ok();
+		Local::regular(&p).remove_file().await.ok();
 		tokio::net::UnixListener::bind(p)
 	}
 
-	#[cfg(not(unix))]
-	pub(super) async fn bind() -> std::io::Result<ServerListener> {
-		tokio::net::TcpListener::bind("127.0.0.1:33581").await
+	#[cfg(windows)]
+	pub(super) async fn bind() -> io::Result<ServerListener> {
+		let p = Self::socket_file().await?;
+		Local::regular(&p).remove_file().await.ok();
+
+		let listener = uds_windows::UnixListener::bind(p)?;
+		listener.set_nonblocking(true)?;
+
+		Ok(WinUnixListener(listener))
 	}
 
-	#[cfg(unix)]
-	fn socket_file() -> std::path::PathBuf {
-		use std::env::temp_dir;
+	async fn socket_file() -> io::Result<&'static PathBuf> {
+		static ONCE: OnceCell<PathBuf> = OnceCell::const_new();
+		ONCE
+			.get_or_try_init(|| async move {
+				let p = Xdg::runtime_dir();
+				create_owned_dir(p).await?;
 
-		use uzers::Users;
-		use yazi_shared::USERS_CACHE;
+				Ok(p.join(".dds.sock"))
+			})
+			.await
+	}
+}
 
-		temp_dir().join(format!(".yazi_dds-{}.sock", USERS_CACHE.get_current_uid()))
+// --- WinUnixListener
+#[cfg(windows)]
+pub(super) struct WinUnixListener(uds_windows::UnixListener);
+
+#[cfg(windows)]
+impl WinUnixListener {
+	pub(super) async fn accept(
+		&self,
+	) -> io::Result<(tokio::net::TcpStream, uds_windows::SocketAddr)> {
+		loop {
+			match self.0.accept() {
+				Ok((stream, addr)) => return Ok((UnixStream::from_uds(stream)?, addr)),
+				Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+					tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+				}
+				Err(e) => return Err(e),
+			}
+		}
 	}
 }

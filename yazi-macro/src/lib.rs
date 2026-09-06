@@ -1,8 +1,12 @@
 mod actor;
 mod asset;
+mod confirm;
 mod context;
+mod data;
 mod event;
 mod fmt;
+mod fs;
+mod input;
 mod log;
 mod module;
 mod platform;

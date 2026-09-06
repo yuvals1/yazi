@@ -2,21 +2,30 @@ use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Default)]
 pub struct Partition {
-	pub src:       OsString,
-	pub dist:      Option<PathBuf>,
+	pub src:         OsString,
+	pub dist:        Option<PathBuf>,
 	#[cfg(unix)]
-	pub rdev:      Option<libc::dev_t>,
-	pub label:     Option<OsString>,
-	pub fstype:    Option<OsString>,
-	pub capacity:  u64,
-	pub external:  Option<bool>,
-	pub removable: Option<bool>,
+	pub(crate) rdev: Option<u64>,
+	pub label:       Option<OsString>,
+	pub fstype:      Option<OsString>,
+	pub capacity:    u64,
+	pub external:    Option<bool>,
+	pub removable:   Option<bool>,
 }
 
 impl Partition {
-	pub fn heuristic(&self) -> bool {
+	// Match mount types that do not update directory mtime on changes,
+	// and should be refreshed frequently.
+	pub(crate) fn timeless(&self) -> bool {
 		let b: &[u8] = self.fstype.as_ref().map_or(b"", |s| s.as_encoded_bytes());
-		!matches!(b, b"exfat" | b"fuse.rclone")
+		matches!(b, b"exfat")
+	}
+
+	// Match mount types that do not reliably emit change notifications,
+	// and should be polled for changes.
+	pub(crate) fn soundless(&self) -> bool {
+		let b: &[u8] = self.fstype.as_ref().map_or(b"", |s| s.as_encoded_bytes());
+		matches!(b, b"fuse.rclone" | b"nfs4")
 	}
 
 	#[rustfmt::skip]

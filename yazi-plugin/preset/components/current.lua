@@ -20,7 +20,8 @@ function Current:empty()
 	end
 
 	return {
-		ui.Line(s):area(self._area):align(ui.Align.CENTER),
+		ui.Text(s):area(self._area):align(ui.Align.CENTER):wrap(ui.Wrap.YES),
+		table.unpack(Dnd:new(self._area):redraw()),
 	}
 end
 
@@ -44,11 +45,16 @@ function Current:redraw()
 	return {
 		ui.List(left):area(self._area),
 		ui.Text(right):area(self._area):align(ui.Align.RIGHT),
+		table.unpack(Dnd:new(self._area):redraw()),
 	}
 end
 
 -- Mouse events
 function Current:click(event, up)
+	if up or event.is_middle then
+		return
+	end
+
 	local y = event.y - self._area.y + 1
 	if self._folder.window[y] then
 		Entity:new(self._folder.window[y]):click(event, up)
@@ -58,3 +64,11 @@ end
 function Current:scroll(event, step) ya.emit("arrow", { step }) end
 
 function Current:touch(event, step) end
+
+function Current:drag(event) return Dnd.drag(event) end
+
+function Current:drop(event)
+	if Dnd.drop(event, self._area) then
+		ui.render()
+	end
+end

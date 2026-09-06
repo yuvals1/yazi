@@ -1,11 +1,11 @@
 use anyhow::{Result, bail};
-use mlua::{ExternalResult, IntoLua, Lua, Value};
-use yazi_shared::Id;
+use mlua::{IntoLua, Lua, Value};
+use yazi_shared::id::Id;
 
-use super::{EmberBulk, EmberBye, EmberCd, EmberCustom, EmberDelete, EmberHey, EmberHi, EmberHover, EmberLoad, EmberMount, EmberMove, EmberRename, EmberTab, EmberTrash, EmberYank};
+use super::{EmberBulkRename, EmberBye, EmberCd, EmberCustom, EmberDelete, EmberDownload, EmberDuplicate, EmberHey, EmberHi, EmberHover, EmberInput, EmberLoad, EmberMount, EmberMove, EmberRename, EmberTab, EmberTheme, EmberTrash, EmberYank};
 use crate::Payload;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Ember<'a> {
 	Hi(EmberHi<'a>),
 	Hey(EmberHey),
@@ -15,17 +15,21 @@ pub enum Ember<'a> {
 	Load(EmberLoad<'a>),
 	Hover(EmberHover<'a>),
 	Rename(EmberRename<'a>),
-	Bulk(EmberBulk<'a>),
+	BulkRename(EmberBulkRename<'a>),
 	Yank(EmberYank<'a>),
+	Duplicate(EmberDuplicate<'a>),
 	Move(EmberMove<'a>),
 	Trash(EmberTrash<'a>),
 	Delete(EmberDelete<'a>),
+	Download(EmberDownload<'a>),
+	Input(EmberInput<'a>),
 	Mount(EmberMount),
+	Theme(EmberTheme),
 	Custom(EmberCustom),
 }
 
 impl Ember<'static> {
-	pub fn from_str(kind: &str, body: &str) -> Result<Self> {
+	pub(crate) fn from_str(kind: &str, body: &str) -> Result<Self> {
 		Ok(match kind {
 			"hi" => Self::Hi(serde_json::from_str(body)?),
 			"hey" => Self::Hey(serde_json::from_str(body)?),
@@ -35,18 +39,22 @@ impl Ember<'static> {
 			"load" => Self::Load(serde_json::from_str(body)?),
 			"hover" => Self::Hover(serde_json::from_str(body)?),
 			"rename" => Self::Rename(serde_json::from_str(body)?),
-			"bulk" => Self::Bulk(serde_json::from_str(body)?),
+			"bulk-rename" => Self::BulkRename(serde_json::from_str(body)?),
 			"@yank" => Self::Yank(serde_json::from_str(body)?),
+			"duplicate" => Self::Duplicate(serde_json::from_str(body)?),
 			"move" => Self::Move(serde_json::from_str(body)?),
 			"trash" => Self::Trash(serde_json::from_str(body)?),
 			"delete" => Self::Delete(serde_json::from_str(body)?),
+			"download" => Self::Download(serde_json::from_str(body)?),
+			"input" => Self::Input(serde_json::from_str(body)?),
 			"mount" => Self::Mount(serde_json::from_str(body)?),
+			"theme" => Self::Theme(serde_json::from_str(body)?),
 			_ => EmberCustom::from_str(kind, body)?,
 		})
 	}
 
 	pub fn from_lua(lua: &Lua, kind: &str, value: Value) -> mlua::Result<Self> {
-		Self::validate(kind).into_lua_err()?;
+		Self::validate(kind)?;
 		EmberCustom::from_lua(lua, kind, value)
 	}
 
@@ -61,18 +69,20 @@ impl Ember<'static> {
 				| "load"
 				| "hover"
 				| "rename"
-				| "bulk"
+				| "bulk-rename"
 				| "@yank"
+				| "duplicate"
 				| "move"
 				| "trash"
 				| "delete"
+				| "download"
+				| "input"
 				| "mount"
-		) || kind.starts_with("emit-")
-			|| kind.starts_with("emit-ind-")
+				| "theme"
+		) || kind.starts_with("key-")
 			|| kind.starts_with("ind-")
-			|| kind.starts_with("key-")
+			|| kind.starts_with("emit-")
 			|| kind.starts_with("relay-")
-			|| kind.starts_with("relay-ind-")
 		{
 			bail!("Cannot construct system event");
 		}
@@ -81,8 +91,8 @@ impl Ember<'static> {
 		if it.peek() == Some(&b'@') {
 			it.next(); // Skip `@` as it's a prefix for static messages
 		}
-		if !it.all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-			bail!("Kind must be alphanumeric with dashes");
+		if !it.all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'-')) {
+			bail!("Kind `{kind}` must be in kebab-case");
 		}
 
 		Ok(())
@@ -100,21 +110,23 @@ impl<'a> Ember<'a> {
 			Self::Load(_) => "load",
 			Self::Hover(_) => "hover",
 			Self::Rename(_) => "rename",
-			Self::Bulk(_) => "bulk",
+			Self::BulkRename(_) => "bulk-rename",
 			Self::Yank(_) => "@yank",
+			Self::Duplicate(_) => "duplicate",
 			Self::Move(_) => "move",
 			Self::Trash(_) => "trash",
 			Self::Delete(_) => "delete",
+			Self::Download(_) => "download",
+			Self::Input(_) => "input",
 			Self::Mount(_) => "mount",
+			Self::Theme(_) => "theme",
 			Self::Custom(b) => b.kind.as_str(),
 		}
 	}
 
-	pub fn with_receiver(self, receiver: Id) -> Payload<'a> {
+	pub(crate) fn with_receiver(self, receiver: Id) -> Payload<'a> {
 		Payload::new(self).with_receiver(receiver)
 	}
-
-	pub fn with_sender(self, sender: Id) -> Payload<'a> { Payload::new(self).with_sender(sender) }
 }
 
 impl<'a> IntoLua for Ember<'a> {
@@ -128,12 +140,16 @@ impl<'a> IntoLua for Ember<'a> {
 			Self::Hover(b) => b.into_lua(lua),
 			Self::Tab(b) => b.into_lua(lua),
 			Self::Rename(b) => b.into_lua(lua),
-			Self::Bulk(b) => b.into_lua(lua),
+			Self::BulkRename(b) => b.into_lua(lua),
 			Self::Yank(b) => b.into_lua(lua),
+			Self::Duplicate(b) => b.into_lua(lua),
 			Self::Move(b) => b.into_lua(lua),
 			Self::Trash(b) => b.into_lua(lua),
 			Self::Delete(b) => b.into_lua(lua),
+			Self::Download(b) => b.into_lua(lua),
+			Self::Input(b) => b.into_lua(lua),
 			Self::Mount(b) => b.into_lua(lua),
+			Self::Theme(b) => b.into_lua(lua),
 			Self::Custom(b) => b.into_lua(lua),
 		}
 	}

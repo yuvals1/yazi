@@ -2,26 +2,26 @@ use std::borrow::Cow;
 
 use mlua::{IntoLua, Lua, Value};
 use serde::{Deserialize, Serialize};
-use yazi_shared::{Id, url::UrlBuf};
+use yazi_shared::{id::Id, url::UrlBuf};
 
 use super::Ember;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmberCd<'a> {
-	pub tab: Id,
-	pub url: Cow<'a, UrlBuf>,
+	tab:   Id,
+	url:   Cow<'a, UrlBuf>,
 	#[serde(skip)]
-	dummy:   bool,
+	dummy: bool,
 }
 
 impl<'a> EmberCd<'a> {
-	pub fn borrowed(tab: Id, url: &'a UrlBuf) -> Ember<'a> {
+	pub(crate) fn borrowed(tab: Id, url: &'a UrlBuf) -> Ember<'a> {
 		Self { tab, url: url.into(), dummy: false }.into()
 	}
 }
 
 impl EmberCd<'static> {
-	pub fn owned(tab: Id, _: &UrlBuf) -> Ember<'static> {
+	pub(crate) fn owned(tab: Id, _: &UrlBuf) -> Ember<'static> {
 		Self { tab, url: Default::default(), dummy: true }.into()
 	}
 }
@@ -35,7 +35,7 @@ impl IntoLua for EmberCd<'_> {
 		lua
 			.create_table_from([
 				("tab", self.tab.get().into_lua(lua)?),
-				("url", Some(self.url).filter(|_| !self.dummy).map(yazi_binding::Url::new).into_lua(lua)?),
+				("url", (!self.dummy).then_some(self.url).map(|u| u.into_owned()).into_lua(lua)?),
 			])?
 			.into_lua(lua)
 	}

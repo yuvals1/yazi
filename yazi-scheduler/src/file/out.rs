@@ -1,21 +1,28 @@
-use crate::{Task, TaskProg};
+use std::io;
 
-// --- Paste
+use crate::{CleanupState, Task, TaskProg};
+
+// --- Copy
 #[derive(Debug)]
-pub(crate) enum FileOutPaste {
+pub(crate) enum FileOutCopy {
 	New(u64),
 	Deform(String),
-	Init,
+	Succ,
+	Fail(String),
 	Clean,
 }
 
-impl From<std::io::Error> for FileOutPaste {
-	fn from(value: std::io::Error) -> Self { Self::Deform(value.to_string()) }
+impl From<anyhow::Error> for FileOutCopy {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
-impl FileOutPaste {
+impl From<std::io::Error> for FileOutCopy {
+	fn from(value: std::io::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutCopy {
 	pub(crate) fn reduce(self, task: &mut Task) {
-		let TaskProg::FilePaste(prog) = &mut task.prog else { return };
+		let TaskProg::FileCopy(prog) = &mut task.prog else { return };
 		match self {
 			Self::New(bytes) => {
 				prog.total_files += 1;
@@ -26,32 +33,119 @@ impl FileOutPaste {
 				prog.failed_files += 1;
 				task.log(reason);
 			}
-			Self::Init => {
-				prog.collected = true;
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
+				task.log(reason);
 			}
 			Self::Clean => {
-				prog.cleaned = true;
+				prog.cleaned = CleanupState::Success;
 			}
 		}
 	}
 }
 
-// --- PasteDo
+// --- CopyDo
 #[derive(Debug)]
-pub(crate) enum FileOutPasteDo {
+pub(crate) enum FileOutCopyDo {
 	Adv(u64),
 	Log(String),
 	Succ,
 	Fail(String),
 }
 
-impl From<std::io::Error> for FileOutPasteDo {
-	fn from(value: std::io::Error) -> Self { Self::Fail(value.to_string()) }
+impl From<anyhow::Error> for FileOutCopyDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
-impl FileOutPasteDo {
+impl FileOutCopyDo {
 	pub(crate) fn reduce(self, task: &mut Task) {
-		let TaskProg::FilePaste(prog) = &mut task.prog else { return };
+		let TaskProg::FileCopy(prog) = &mut task.prog else { return };
+		match self {
+			Self::Adv(size) => {
+				prog.processed_bytes += size;
+			}
+			Self::Log(line) => {
+				task.log(line);
+			}
+			Self::Succ => {
+				prog.success_files += 1;
+			}
+			Self::Fail(reason) => {
+				prog.failed_files += 1;
+				task.log(reason);
+			}
+		}
+	}
+}
+
+// --- Move
+#[derive(Debug)]
+pub(crate) enum FileOutMove {
+	New(u64),
+	Deform(String),
+	Succ,
+	Fail(String),
+	Clean(io::Result<()>),
+}
+
+impl From<anyhow::Error> for FileOutMove {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl From<std::io::Error> for FileOutMove {
+	fn from(value: std::io::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutMove {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileMove(prog) = &mut task.prog else { return };
+		match self {
+			Self::New(bytes) => {
+				prog.total_files += 1;
+				prog.total_bytes += bytes;
+			}
+			Self::Deform(reason) => {
+				prog.total_files += 1;
+				prog.failed_files += 1;
+				task.log(reason);
+			}
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
+				task.log(reason);
+			}
+			Self::Clean(Ok(())) => {
+				prog.cleaned = CleanupState::Success;
+			}
+			Self::Clean(Err(reason)) => {
+				prog.cleaned = CleanupState::Failed;
+				task.log(format!("Failed cleaning up moved file: {reason:?}"));
+			}
+		}
+	}
+}
+
+// --- MoveDo
+#[derive(Debug)]
+pub(crate) enum FileOutMoveDo {
+	Adv(u64),
+	Log(String),
+	Succ,
+	Fail(String),
+}
+
+impl From<anyhow::Error> for FileOutMoveDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutMoveDo {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileMove(prog) = &mut task.prog else { return };
 		match self {
 			Self::Adv(size) => {
 				prog.processed_bytes += size;
@@ -75,14 +169,11 @@ impl FileOutPasteDo {
 pub(crate) enum FileOutLink {
 	Succ,
 	Fail(String),
+	Clean,
 }
 
 impl From<anyhow::Error> for FileOutLink {
-	fn from(value: anyhow::Error) -> Self { Self::Fail(value.to_string()) }
-}
-
-impl From<std::io::Error> for FileOutLink {
-	fn from(value: std::io::Error) -> Self { Self::Fail(value.to_string()) }
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutLink {
@@ -96,8 +187,11 @@ impl FileOutLink {
 					prog.state = Some(false);
 					task.log(reason);
 				}
+				Self::Clean => {
+					prog.cleaned = CleanupState::Success;
+				}
 			}
-		} else if let TaskProg::FilePaste(prog) = &mut task.prog {
+		} else if let TaskProg::FileCopy(prog) = &mut task.prog {
 			match self {
 				Self::Succ => {
 					prog.success_files += 1;
@@ -106,6 +200,18 @@ impl FileOutLink {
 					prog.failed_files += 1;
 					task.log(reason);
 				}
+				Self::Clean => {}
+			}
+		} else if let TaskProg::FileMove(prog) = &mut task.prog {
+			match self {
+				Self::Succ => {
+					prog.success_files += 1;
+				}
+				Self::Fail(reason) => {
+					prog.failed_files += 1;
+					task.log(reason);
+				}
+				Self::Clean => {}
 			}
 		}
 	}
@@ -116,11 +222,17 @@ impl FileOutLink {
 pub(crate) enum FileOutHardlink {
 	New,
 	Deform(String),
-	Init,
+	Succ,
+	Fail(String),
+	Clean,
+}
+
+impl From<anyhow::Error> for FileOutHardlink {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl From<std::io::Error> for FileOutHardlink {
-	fn from(value: std::io::Error) -> Self { Self::Deform(value.to_string()) }
+	fn from(value: std::io::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutHardlink {
@@ -135,8 +247,15 @@ impl FileOutHardlink {
 				prog.failed += 1;
 				task.log(reason);
 			}
-			Self::Init => {
-				prog.collected = true;
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
+				task.log(reason);
+			}
+			Self::Clean => {
+				prog.cleaned = CleanupState::Success;
 			}
 		}
 	}
@@ -149,8 +268,8 @@ pub(crate) enum FileOutHardlinkDo {
 	Fail(String),
 }
 
-impl From<std::io::Error> for FileOutHardlinkDo {
-	fn from(value: std::io::Error) -> Self { Self::Fail(value.to_string()) }
+impl From<anyhow::Error> for FileOutHardlinkDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutHardlinkDo {
@@ -172,13 +291,13 @@ impl FileOutHardlinkDo {
 #[derive(Debug)]
 pub(crate) enum FileOutDelete {
 	New(u64),
-	Deform(String),
-	Init,
-	Clean,
+	Succ,
+	Fail(String),
+	Clean(io::Result<()>),
 }
 
-impl From<std::io::Error> for FileOutDelete {
-	fn from(value: std::io::Error) -> Self { Self::Deform(value.to_string()) }
+impl From<anyhow::Error> for FileOutDelete {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutDelete {
@@ -189,16 +308,19 @@ impl FileOutDelete {
 				prog.total_files += 1;
 				prog.total_bytes += size;
 			}
-			Self::Deform(reason) => {
-				prog.total_files += 1;
-				prog.failed_files += 1;
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
 				task.log(reason);
 			}
-			Self::Init => {
-				prog.collected = true;
+			Self::Clean(Ok(())) => {
+				prog.cleaned = CleanupState::Success;
 			}
-			Self::Clean => {
-				prog.cleaned = true;
+			Self::Clean(Err(reason)) => {
+				prog.cleaned = CleanupState::Failed;
+				task.log(format!("Failed cleaning up deleted file: {reason:?}"));
 			}
 		}
 	}
@@ -211,8 +333,8 @@ pub(crate) enum FileOutDeleteDo {
 	Fail(String),
 }
 
-impl From<std::io::Error> for FileOutDeleteDo {
-	fn from(value: std::io::Error) -> Self { Self::Fail(value.to_string()) }
+impl From<anyhow::Error> for FileOutDeleteDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutDeleteDo {
@@ -236,10 +358,11 @@ impl FileOutDeleteDo {
 pub(crate) enum FileOutTrash {
 	Succ,
 	Fail(String),
+	Clean,
 }
 
-impl From<std::io::Error> for FileOutTrash {
-	fn from(value: std::io::Error) -> Self { Self::Fail(value.to_string()) }
+impl From<anyhow::Error> for FileOutTrash {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
 }
 
 impl FileOutTrash {
@@ -251,6 +374,155 @@ impl FileOutTrash {
 			}
 			Self::Fail(reason) => {
 				prog.state = Some(false);
+				task.log(reason);
+			}
+			Self::Clean => {
+				prog.cleaned = CleanupState::Success;
+			}
+		}
+	}
+}
+
+// --- Download
+#[derive(Debug)]
+pub(crate) enum FileOutDownload {
+	New(u64),
+	Deform(String),
+	Succ,
+	Fail(String),
+	Clean,
+}
+
+impl From<anyhow::Error> for FileOutDownload {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutDownload {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileDownload(prog) = &mut task.prog else { return };
+		match self {
+			Self::New(bytes) => {
+				prog.total_files += 1;
+				prog.total_bytes += bytes;
+			}
+			Self::Deform(reason) => {
+				prog.total_files += 1;
+				prog.failed_files += 1;
+				task.log(reason);
+			}
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
+				task.log(reason);
+			}
+			Self::Clean => {
+				prog.cleaned = CleanupState::Success;
+			}
+		}
+	}
+}
+
+// --- DownloadDo
+#[derive(Debug)]
+pub(crate) enum FileOutDownloadDo {
+	Adv(u64),
+	Log(String),
+	Succ,
+	Fail(String),
+}
+
+impl From<anyhow::Error> for FileOutDownloadDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutDownloadDo {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileDownload(prog) = &mut task.prog else { return };
+		match self {
+			Self::Adv(size) => {
+				prog.processed_bytes += size;
+			}
+			Self::Log(line) => {
+				task.log(line);
+			}
+			Self::Succ => {
+				prog.success_files += 1;
+			}
+			Self::Fail(reason) => {
+				prog.failed_files += 1;
+				task.log(reason);
+			}
+		}
+	}
+}
+
+// --- Upload
+#[derive(Debug)]
+pub(crate) enum FileOutUpload {
+	New(u64),
+	Deform(String),
+	Succ,
+	Fail(String),
+	Clean,
+}
+
+impl From<anyhow::Error> for FileOutUpload {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutUpload {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileUpload(prog) = &mut task.prog else { return };
+		match self {
+			Self::New(bytes) => {
+				prog.total_files += 1;
+				prog.total_bytes += bytes;
+			}
+			Self::Deform(reason) => {
+				prog.total_files += 1;
+				prog.failed_files += 1;
+				task.log(reason);
+			}
+			Self::Succ => {
+				prog.collected = Some(true);
+			}
+			Self::Fail(reason) => {
+				prog.collected = Some(false);
+				task.log(reason);
+			}
+			Self::Clean => {
+				prog.cleaned = CleanupState::Success;
+			}
+		}
+	}
+}
+
+// --- UploadDo
+#[derive(Debug)]
+pub(crate) enum FileOutUploadDo {
+	Adv(u64),
+	Succ,
+	Fail(String),
+}
+
+impl From<anyhow::Error> for FileOutUploadDo {
+	fn from(value: anyhow::Error) -> Self { Self::Fail(format!("{value:?}")) }
+}
+
+impl FileOutUploadDo {
+	pub(crate) fn reduce(self, task: &mut Task) {
+		let TaskProg::FileUpload(prog) = &mut task.prog else { return };
+		match self {
+			Self::Adv(size) => {
+				prog.processed_bytes += size;
+			}
+			Self::Succ => {
+				prog.success_files += 1;
+			}
+			Self::Fail(reason) => {
+				prog.failed_files += 1;
 				task.log(reason);
 			}
 		}

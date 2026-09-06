@@ -1,29 +1,30 @@
 use std::{any::TypeId, mem};
 
 use ansi_to_tui::IntoText;
-use mlua::{AnyUserData, ExternalError, ExternalResult, IntoLua, Lua, MetaMethod, Table, UserData, Value};
-use ratatui::widgets::Widget;
+use mlua::{AnyUserData, ExternalError, ExternalResult, FromLua, IntoLua, Lua, LuaString, MetaMethod, Table, UserData, UserDataMethods, Value};
+use ratatui_core::widgets::Widget;
+use yazi_shim::{fs::Error, ratatui::TextIter};
 
 use super::{Area, Line, Span, Wrap};
-use crate::{Error, elements::Align};
+use crate::elements::{Align, Spatial};
 
 const EXPECTED: &str = "expected a string, Line, Span, or a table of them";
 
 #[derive(Clone, Debug, Default)]
 pub struct Text {
-	pub area: Area,
+	area: Area,
 
 	// TODO: block
-	pub inner:  ratatui::text::Text<'static>,
-	pub wrap:   Wrap,
-	pub scroll: ratatui::layout::Position,
+	pub(crate) inner: ratatui_core::text::Text<'static>,
+	wrap:             Wrap,
+	scroll:           ratatui_core::layout::Position,
 }
 
 impl Text {
 	pub fn compose(lua: &Lua) -> mlua::Result<Value> {
-		let new = lua.create_function(|_, (_, value): (Table, Value)| Self::try_from(value))?;
+		let new = lua.create_function(|_, (_, text): (Table, Self)| Ok(text))?;
 
-		let parse = lua.create_function(|_, code: mlua::String| {
+		let parse = lua.create_function(|_, code: LuaString| {
 			Ok(Self { inner: code.as_bytes().into_text().into_lua_err()?, ..Default::default() })
 		})?;
 
@@ -32,33 +33,35 @@ impl Text {
 		text.into_lua(lua)
 	}
 
-	pub(super) fn render(self, rect: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-		if self.wrap.is_none() && self.scroll == Default::default() {
-			self.inner.render(rect, buf);
-		} else {
-			ratatui::widgets::Paragraph::from(self).render(rect, buf);
+	pub fn wrap(mut self, wrap: impl Into<Wrap>) -> Self {
+		self.wrap = wrap.into();
+		self
+	}
+
+	pub(crate) fn line_count(&self, width: u16) -> usize {
+		let Some(wrap) = self.wrap.0 else {
+			return self.inner.height();
+		};
+
+		let mut lines = TextIter::new(&self.inner, wrap, width);
+		let mut count = 0;
+		while lines.next().is_some() {
+			count += 1;
 		}
+		count
+	}
+
+	pub(crate) fn needs_upgrade(&self) -> bool {
+		self.wrap.is_some() || self.scroll != Default::default()
 	}
 }
 
-impl TryFrom<Value> for Text {
-	type Error = mlua::Error;
+impl From<ratatui_core::text::Text<'static>> for Text {
+	fn from(inner: ratatui_core::text::Text<'static>) -> Self { Self { inner, ..Default::default() } }
+}
 
-	fn try_from(value: Value) -> mlua::Result<Self> {
-		let inner = match value {
-			Value::Table(tb) => return Self::try_from(tb),
-			Value::String(s) => s.to_string_lossy().into(),
-			Value::UserData(ud) => match ud.type_id() {
-				Some(t) if t == TypeId::of::<Line>() => ud.take::<Line>()?.inner.into(),
-				Some(t) if t == TypeId::of::<Span>() => ud.take::<Span>()?.0.into(),
-				Some(t) if t == TypeId::of::<Self>() => return ud.take(),
-				Some(t) if t == TypeId::of::<Error>() => ud.take::<Error>()?.into_string().into(),
-				_ => Err(EXPECTED.into_lua_err())?,
-			},
-			_ => Err(EXPECTED.into_lua_err())?,
-		};
-		Ok(Self { inner, ..Default::default() })
-	}
+impl From<String> for Text {
+	fn from(value: String) -> Self { Self { inner: value.into(), ..Default::default() } }
 }
 
 impl TryFrom<Table> for Text {
@@ -72,7 +75,7 @@ impl TryFrom<Table> for Text {
 				Value::UserData(ud) => match ud.type_id() {
 					Some(t) if t == TypeId::of::<Span>() => ud.take::<Span>()?.0.into(),
 					Some(t) if t == TypeId::of::<Line>() => ud.take::<Line>()?.inner,
-					Some(t) if t == TypeId::of::<Error>() => ud.take::<Error>()?.into_string().into(),
+					Some(t) if t == TypeId::of::<Error>() => ud.take::<Error>()?.to_string().into(),
 					_ => Err(EXPECTED.into_lua_err())?,
 				},
 				_ => Err(EXPECTED.into_lua_err())?,
@@ -82,16 +85,16 @@ impl TryFrom<Table> for Text {
 	}
 }
 
-impl From<Text> for ratatui::text::Text<'static> {
+impl From<Text> for ratatui_core::text::Text<'static> {
 	fn from(value: Text) -> Self { value.inner }
 }
 
-impl From<Text> for ratatui::widgets::Paragraph<'static> {
+impl From<Text> for ratatui_widgets::paragraph::Paragraph<'static> {
 	fn from(mut value: Text) -> Self {
 		let align = value.inner.alignment.take();
 		let style = mem::take(&mut value.inner.style);
 
-		let mut p = ratatui::widgets::Paragraph::new(value.inner).style(style);
+		let mut p = ratatui_widgets::paragraph::Paragraph::new(value.inner).style(style);
 		if let Some(align) = align {
 			p = p.alignment(align);
 		}
@@ -102,22 +105,81 @@ impl From<Text> for ratatui::widgets::Paragraph<'static> {
 	}
 }
 
+impl Spatial for Text {
+	fn area(&self) -> Area { self.area }
+
+	fn set_area(&mut self, area: Area) { self.area = area; }
+}
+
+impl Widget for Text {
+	fn render(self, rect: ratatui_core::layout::Rect, buf: &mut ratatui_core::buffer::Buffer)
+	where
+		Self: Sized,
+	{
+		if self.needs_upgrade() {
+			ratatui_widgets::paragraph::Paragraph::from(self).render(rect, buf);
+		} else {
+			self.inner.render(rect, buf);
+		}
+	}
+}
+
+impl Widget for &Text {
+	fn render(self, rect: ratatui_core::layout::Rect, buf: &mut ratatui_core::buffer::Buffer)
+	where
+		Self: Sized,
+	{
+		if self.needs_upgrade() {
+			ratatui_widgets::paragraph::Paragraph::from(self.clone()).render(rect, buf);
+		} else {
+			(&self.inner).render(rect, buf);
+		}
+	}
+}
+
+impl TryFrom<&AnyUserData> for Text {
+	type Error = mlua::Error;
+
+	fn try_from(value: &AnyUserData) -> Result<Self, Self::Error> {
+		let inner = match value.type_id() {
+			Some(t) if t == TypeId::of::<Self>() => return value.take(),
+			Some(t) if t == TypeId::of::<Line>() => value.take::<Line>()?.inner.into(),
+			Some(t) if t == TypeId::of::<Span>() => value.take::<Span>()?.0.into(),
+			Some(t) if t == TypeId::of::<Error>() => value.take::<Error>()?.to_string().into(),
+			_ => Err(EXPECTED.into_lua_err())?,
+		};
+
+		Ok(Self { inner, ..Default::default() })
+	}
+}
+
+impl FromLua for Text {
+	fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+		Ok(match value {
+			Value::Table(tb) => Self::try_from(tb)?,
+			Value::String(s) => Self { inner: s.to_string_lossy().into(), ..Default::default() },
+			Value::UserData(ud) => Self::try_from(&ud)?,
+			_ => Err(EXPECTED.into_lua_err())?,
+		})
+	}
+}
+
 impl UserData for Text {
-	fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
 		crate::impl_area_method!(methods);
 		crate::impl_style_method!(methods, inner.style);
 		crate::impl_style_shorthands!(methods, inner.style);
 
-		methods.add_function_mut("align", |_, (ud, align): (AnyUserData, Align)| {
+		methods.add_function("align", |_, (ud, align): (AnyUserData, Align)| {
 			ud.borrow_mut::<Self>()?.inner.alignment = Some(align.0);
 			Ok(ud)
 		});
-		methods.add_function_mut("wrap", |_, (ud, wrap): (AnyUserData, Wrap)| {
+		methods.add_function("wrap", |_, (ud, wrap): (AnyUserData, Wrap)| {
 			ud.borrow_mut::<Self>()?.wrap = wrap;
 			Ok(ud)
 		});
-		methods.add_function_mut("scroll", |_, (ud, x, y): (AnyUserData, u16, u16)| {
-			ud.borrow_mut::<Self>()?.scroll = ratatui::layout::Position { x, y };
+		methods.add_function("scroll", |_, (ud, x, y): (AnyUserData, u16, u16)| {
+			ud.borrow_mut::<Self>()?.scroll = ratatui_core::layout::Position { x, y };
 			Ok(ud)
 		});
 		methods.add_method("max_width", |_, me, ()| {

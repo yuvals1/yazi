@@ -1,11 +1,13 @@
-#![allow(clippy::if_same_then_else, clippy::option_map_unit_fn)]
+extern crate self as yazi_fs;
 
-yazi_macro::mod_pub!(cha mounts provider path);
+yazi_macro::mod_pub!(cha file mounts path engine trash);
 
-yazi_macro::mod_flat!(calculator cwd file files filter fns op sorter sorting stage tags xdg);
+yazi_macro::mod_flat!(auth cwd entries filter fns hash normalizer op sorter sorting splatter stage tags url xdg);
 
 pub fn init() {
 	CWD.init(<_>::default());
 
 	mounts::init();
+
+	Xdg::load();
 }

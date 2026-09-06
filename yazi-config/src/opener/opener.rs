@@ -1,68 +1,129 @@
-use std::{mem, ops::Deref};
+use std::{mem, ops::Deref, sync::Arc};
 
-use anyhow::Result;
+use arc_swap::ArcSwap;
 use hashbrown::HashMap;
-use indexmap::IndexSet;
-use serde::Deserialize;
+use mlua::{ExternalError, FromLua, IntoLua, IntoLuaMulti, LuaString, MetaMethod, UserData, UserDataMethods, Value};
+use serde::{Deserialize, Deserializer};
+use yazi_shim::{arc_swap::IntoPointee, toml::{DeserializeOverHook, DeserializeOverWith}};
 
-use super::OpenerRule;
-use crate::check_for;
+use crate::{open::OpenRule, opener::{OpenerRuleArc, OpenerRuleMatcher, OpenerRulesArc, OpenerRulesMatcher}};
 
 #[derive(Debug, Deserialize)]
-pub struct Opener(HashMap<String, Vec<OpenerRule>>);
+pub struct Opener(ArcSwap<HashMap<String, OpenerRulesArc>>);
 
 impl Deref for Opener {
-	type Target = HashMap<String, Vec<OpenerRule>>;
+	type Target = ArcSwap<HashMap<String, OpenerRulesArc>>;
 
 	fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 impl Opener {
-	pub fn all<'a, I>(&'a self, uses: I) -> Vec<&'a OpenerRule>
+	pub fn all<I>(&self, names: I) -> impl Iterator<Item = OpenerRuleArc> + use<I>
 	where
-		I: Iterator<Item = &'a str>,
+		I: IntoIterator,
+		I::Item: AsRef<str>,
 	{
-		uses.flat_map(|use_| self.get(use_)).flatten().collect()
+		let inner = self.0.load_full();
+		names
+			.into_iter()
+			.filter_map(move |name| inner.get(name.as_ref()).cloned())
+			.flat_map(|rules| OpenerRuleMatcher::from(&rules))
 	}
 
-	pub fn first<'a, 'b, I>(&'a self, uses: I) -> Option<&'a OpenerRule>
-	where
-		I: Iterator<Item = &'b str>,
-	{
-		uses.flat_map(|use_| self.get(use_)).flatten().next()
+	pub fn first(&self, open: &OpenRule) -> Option<OpenerRuleArc> {
+		let inner = self.0.load();
+		open
+			.r#use
+			.iter()
+			.filter_map(|name| inner.get(name))
+			.find_map(|rules| rules.load().first().cloned())
 	}
 
-	pub fn block<'a, I>(&'a self, uses: I) -> Option<&'a OpenerRule>
-	where
-		I: Iterator<Item = &'a str>,
-	{
-		uses.flat_map(|use_| self.get(use_)).flatten().find(|&o| o.block)
+	pub fn block(&self, open: &OpenRule) -> Option<OpenerRuleArc> {
+		let inner = self.0.load();
+		open
+			.r#use
+			.iter()
+			.filter_map(|name| inner.get(name))
+			.find_map(|rules| rules.load().iter().find(|r| r.block).cloned())
+	}
+
+	fn insert(&self, name: &str, rules: &OpenerRulesArc) {
+		self.0.rcu(|inner| {
+			let mut next = HashMap::clone(inner);
+			next.insert(name.to_owned(), rules.clone());
+			next
+		});
+	}
+
+	fn remove(&self, name: &str) {
+		self.0.rcu(|inner| {
+			let mut next = HashMap::clone(inner);
+			next.remove(name);
+			next
+		});
+	}
+
+	fn unwrap_unchecked(self) -> HashMap<String, OpenerRulesArc> {
+		Arc::try_unwrap(self.0.into_inner()).expect("unique opener arc")
 	}
 }
 
-impl Opener {
-	pub(crate) fn reshape(mut self) -> Result<Self> {
-		for rules in self.0.values_mut() {
-			*rules = mem::take(rules)
-				.into_iter()
-				.map(|mut r| (r.r#for.take(), r))
-				.filter(|(r#for, _)| check_for(r#for.as_deref()))
-				.map(|(_, r)| r.reshape())
-				.collect::<Result<IndexSet<_>>>()?
-				.into_iter()
-				.collect();
+impl DeserializeOverHook for Opener {
+	fn deserialize_over_hook(self) -> Result<Self, toml::de::Error> {
+		let mut inner = self.unwrap_unchecked();
+		for rules in inner.values_mut() {
+			*rules = Arc::try_unwrap(mem::take(rules))
+				.expect("unique opener value arc")
+				.deserialize_over_hook()?
+				.into();
 		}
 
-		Ok(self)
+		Ok(Self(inner.into_pointee()))
 	}
+}
 
-	pub(crate) fn deserialize_over<'de, D>(mut self, deserializer: D) -> Result<Self, D::Error>
-	where
-		D: serde::Deserializer<'de>,
-	{
-		let map: HashMap<String, Vec<OpenerRule>> = HashMap::deserialize(deserializer)?;
-		self.0.extend(map);
+impl DeserializeOverWith for Opener {
+	fn deserialize_over_with<'de, D: Deserializer<'de>>(self, de: D) -> Result<Self, D::Error> {
+		Ok(Self(self.0.deserialize_over_with(de)?))
+	}
+}
 
-		Ok(self)
+impl UserData for &'static Opener {
+	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+		methods.add_meta_method(MetaMethod::Index, |lua, &me, key: LuaString| {
+			let key = key.to_str()?;
+			match me.load().get(&*key) {
+				Some(rules) => rules.clone().into_lua(lua),
+				None => Ok(Value::Nil),
+			}
+		});
+
+		methods.add_meta_method(MetaMethod::NewIndex, |lua, &me, (key, value): (LuaString, Value)| {
+			let key = key.to_str()?;
+			match value {
+				t @ Value::Table(_) => {
+					me.insert(&key, &OpenerRulesArc::from_lua(t, lua)?);
+				}
+				Value::Nil => {
+					me.remove(&key);
+				}
+				_ => return Err("expected a table or nil".into_lua_err()),
+			}
+			Ok(())
+		});
+
+		methods.add_meta_method(MetaMethod::Pairs, |lua, &me, ()| {
+			let mut matcher = OpenerRulesMatcher::from(me);
+			let iter = lua.create_function_mut(move |lua, ()| {
+				if let Some((name, rules)) = matcher.next() {
+					(name, rules).into_lua_multi(lua)
+				} else {
+					().into_lua_multi(lua)
+				}
+			})?;
+
+			Ok(iter)
+		});
 	}
 }

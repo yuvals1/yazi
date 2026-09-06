@@ -1,13 +1,13 @@
-yazi_macro::mod_pub!(backend);
+yazi_macro::mod_pub!(local r#virtual);
 
-yazi_macro::mod_flat!(linked watched watcher);
+yazi_macro::mod_flat!(backend proxy refresher reporter watched watchee watcher);
 
-pub static LINKED: yazi_shared::RoCell<parking_lot::RwLock<Linked>> = yazi_shared::RoCell::new();
-pub static WATCHED: yazi_shared::RoCell<parking_lot::RwLock<Watched>> = yazi_shared::RoCell::new();
-pub static WATCHER: yazi_shared::RoCell<tokio::sync::Semaphore> = yazi_shared::RoCell::new();
+pub(crate) static WATCHED: yazi_shim::cell::RoCell<parking_lot::RwLock<Watched>> =
+	yazi_shim::cell::RoCell::new();
+pub static WATCHER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 pub fn init() {
-	LINKED.with(<_>::default);
 	WATCHED.with(<_>::default);
-	WATCHER.init(tokio::sync::Semaphore::new(1));
+
+	local::init();
 }

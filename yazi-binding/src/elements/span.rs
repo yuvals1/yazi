@@ -1,14 +1,14 @@
 use std::{borrow::Cow, ops::{Deref, DerefMut}};
 
-use mlua::{AnyUserData, ExternalError, IntoLua, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
+use mlua::{AnyUserData, ExternalError, FromLua, IntoLua, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
 use unicode_width::UnicodeWidthChar;
 
 const EXPECTED: &str = "expected a string or Span";
 
-pub struct Span(pub(super) ratatui::text::Span<'static>);
+pub struct Span(pub(super) ratatui_core::text::Span<'static>);
 
 impl Deref for Span {
-	type Target = ratatui::text::Span<'static>;
+	type Target = ratatui_core::text::Span<'static>;
 
 	fn deref(&self) -> &Self::Target { &self.0 }
 }
@@ -19,7 +19,7 @@ impl DerefMut for Span {
 
 impl Span {
 	pub fn compose(lua: &Lua) -> mlua::Result<Value> {
-		let new = lua.create_function(|_, (_, value): (Table, Value)| Self::try_from(value))?;
+		let new = lua.create_function(|_, (_, span): (Table, Self)| Ok(span))?;
 
 		let span = lua.create_table()?;
 		span.set_metatable(Some(lua.create_table_from([(MetaMethod::Call.name(), new)])?))?;
@@ -58,21 +58,21 @@ impl Span {
 	}
 }
 
-impl TryFrom<Value> for Span {
+impl TryFrom<&AnyUserData> for Span {
 	type Error = mlua::Error;
 
-	fn try_from(value: Value) -> Result<Self, Self::Error> {
-		Ok(Self(match value {
-			Value::String(s) => s.to_string_lossy().into(),
-			Value::UserData(ud) => {
-				if let Ok(Self(span)) = ud.take() {
-					span
-				} else {
-					Err(EXPECTED.into_lua_err())?
-				}
-			}
+	fn try_from(value: &AnyUserData) -> Result<Self, Self::Error> {
+		if let Ok(span) = value.take() { Ok(span) } else { Err(EXPECTED.into_lua_err()) }
+	}
+}
+
+impl FromLua for Span {
+	fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+		Ok(match value {
+			Value::String(s) => Self(s.to_string_lossy().into()),
+			Value::UserData(ud) => Self::try_from(&ud)?,
 			_ => Err(EXPECTED.into_lua_err())?,
-		}))
+		})
 	}
 }
 
@@ -84,7 +84,7 @@ impl UserData for Span {
 		methods.add_method("visible", |_, Self(me), ()| {
 			Ok(me.content.chars().any(|c| c.width().unwrap_or(0) > 0))
 		});
-		methods.add_function_mut("truncate", |_, (ud, t): (AnyUserData, Table)| {
+		methods.add_function("truncate", |_, (ud, t): (AnyUserData, Table)| {
 			ud.borrow_mut::<Self>()?.truncate(t.raw_get("max")?);
 			Ok(ud)
 		});

@@ -1,54 +1,61 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_fs::path::expand_url;
-use yazi_shared::{event::CmdCow, url::{UrlBuf, UrlCow}};
+use serde::Deserialize;
+use yazi_core::mgr::CdSource;
+use yazi_fs::path::{clean_url, expand_url};
+use yazi_shared::{event::ActionCow, url::UrlBuf};
+use yazi_vfs::engine;
 
-use crate::mgr::CdSource;
-
-#[derive(Debug)]
-pub struct RevealOpt {
-	pub target:   UrlCow<'static>,
+#[derive(Debug, Deserialize)]
+pub struct RevealForm {
+	#[serde(alias = "0")]
+	pub target:   UrlBuf,
+	#[serde(default)]
+	raw:          bool,
+	#[serde(default = "default_source")]
 	pub source:   CdSource,
+	#[serde(alias = "no-dummy", default)]
 	pub no_dummy: bool,
 }
 
-impl From<CmdCow> for RevealOpt {
-	fn from(mut c: CmdCow) -> Self {
-		let mut target = c.take_first_url().unwrap_or_default();
+impl TryFrom<ActionCow> for RevealForm {
+	type Error = anyhow::Error;
 
-		if !c.bool("raw") {
-			target = expand_url(target).into();
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> {
+		let mut me: Self = a.deserialize()?;
+
+		if !me.raw {
+			me.target = expand_url(me.target).into_owned();
 		}
 
-		Self { target, source: CdSource::Reveal, no_dummy: c.bool("no-dummy") }
+		if let Some(u) = engine::try_absolute(&me.target)
+			&& u.is_owned()
+		{
+			me.target = u.into_owned();
+		}
+
+		me.target = clean_url(me.target);
+		Ok(me)
 	}
 }
 
-impl From<UrlCow<'static>> for RevealOpt {
-	fn from(target: UrlCow<'static>) -> Self {
-		Self { target, source: CdSource::Reveal, no_dummy: false }
+impl From<UrlBuf> for RevealForm {
+	fn from(target: UrlBuf) -> Self {
+		Self { target, raw: false, source: CdSource::Reveal, no_dummy: false }
 	}
 }
 
-impl From<(UrlCow<'static>, CdSource)> for RevealOpt {
-	fn from((target, source): (UrlCow<'static>, CdSource)) -> Self {
-		Self { target, source, no_dummy: false }
-	}
-}
-
-impl From<UrlBuf> for RevealOpt {
-	fn from(target: UrlBuf) -> Self { Self::from(UrlCow::from(target)) }
-}
-
-impl From<(UrlBuf, CdSource)> for RevealOpt {
+impl From<(UrlBuf, CdSource)> for RevealForm {
 	fn from((target, source): (UrlBuf, CdSource)) -> Self {
-		Self::from((UrlCow::from(target), source))
+		Self { target, raw: false, source, no_dummy: false }
 	}
 }
 
-impl FromLua for RevealOpt {
+impl FromLua for RevealForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for RevealOpt {
+impl IntoLua for RevealForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }
+
+fn default_source() -> CdSource { CdSource::Reveal }

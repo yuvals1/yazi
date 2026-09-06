@@ -1,51 +1,16 @@
-use yazi_shared::Id;
+use std::borrow::Cow;
 
-use crate::{file::{FileInDelete, FileInHardlink, FileInLink, FileInPaste, FileInTrash}, impl_from_in, plugin::PluginInEntry, prework::{PreworkInFetch, PreworkInLoad, PreworkInSize}};
+use yazi_shared::id::Id;
+use yazi_shim::SStr;
 
-#[derive(Debug)]
-pub(crate) enum TaskIn {
-	// File
-	FilePaste(FileInPaste),
-	FileLink(FileInLink),
-	FileHardlink(FileInHardlink),
-	FileDelete(FileInDelete),
-	FileTrash(FileInTrash),
+pub trait TaskIn {
+	type Prog;
 
-	// Plugin
-	PluginEntry(PluginInEntry),
+	fn id(&self) -> Id;
 
-	// Prework
-	PreworkFetch(PreworkInFetch),
-	PreworkLoad(PreworkInLoad),
-	PreworkSize(PreworkInSize),
-}
+	fn set_id(&mut self, id: Id) -> &mut Self;
 
-impl_from_in! {
-	// File
-	FilePaste(FileInPaste), FileLink(FileInLink), FileHardlink(FileInHardlink), FileDelete(FileInDelete), FileTrash(FileInTrash),
-	// Plugin
-	PluginEntry(PluginInEntry),
-	// Prework
-	PreworkFetch(PreworkInFetch), PreworkLoad(PreworkInLoad), PreworkSize(PreworkInSize),
-}
+	fn title(&self) -> Cow<'_, str>;
 
-impl TaskIn {
-	pub fn id(&self) -> Id {
-		match self {
-			// File
-			Self::FilePaste(r#in) => r#in.id,
-			Self::FileLink(r#in) => r#in.id,
-			Self::FileHardlink(r#in) => r#in.id,
-			Self::FileDelete(r#in) => r#in.id,
-			Self::FileTrash(r#in) => r#in.id,
-
-			// Plugin
-			Self::PluginEntry(r#in) => r#in.id,
-
-			// Prework
-			Self::PreworkFetch(r#in) => r#in.id,
-			Self::PreworkLoad(r#in) => r#in.id,
-			Self::PreworkSize(r#in) => r#in.id,
-		}
-	}
+	fn set_title(&mut self, _title: impl Into<SStr>) -> &mut Self { self }
 }

@@ -1,30 +1,30 @@
 use anyhow::Result;
 use yazi_macro::{render, succ};
-use yazi_parser::mgr::ToggleAllOpt;
-use yazi_proxy::AppProxy;
-use yazi_shared::event::Data;
+use yazi_parser::mgr::ToggleAllForm;
+use yazi_scheduler::NotifyProxy;
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct ToggleAll;
 
 impl Actor for ToggleAll {
-	type Options = ToggleAllOpt;
+	type Form = ToggleAllForm;
 
 	const NAME: &str = "toggle_all";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		use yazi_shared::Either::*;
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
+		use either::Either::*;
 		let tab = cx.tab_mut();
 
-		let it = tab.current.files.iter().map(|f| &f.url);
-		let either = match opt.state {
-			Some(true) if opt.urls.is_empty() => Left((vec![], it.collect())),
-			Some(true) => Right((vec![], opt.urls)),
-			Some(false) if opt.urls.is_empty() => Left((it.collect(), vec![])),
-			Some(false) => Right((opt.urls, vec![])),
-			None if opt.urls.is_empty() => Left(it.partition(|&u| tab.selected.contains(u))),
-			None => Right(opt.urls.into_iter().partition(|u| tab.selected.contains(u))),
+		let it = tab.current.entries.iter();
+		let either = match form.state {
+			Some(true) if form.files.is_empty() => Left((vec![], it.collect())),
+			Some(true) => Right((vec![], form.files)),
+			Some(false) if form.files.is_empty() => Left((it.collect(), vec![])),
+			Some(false) => Right((form.files, vec![])),
+			None if form.files.is_empty() => Left(it.partition(|&f| tab.selected.contains(f))),
+			None => Right(form.files.into_iter().partition(|f| tab.selected.contains(f))),
 		};
 
 		let warn = match either {
@@ -34,14 +34,14 @@ impl Actor for ToggleAll {
 			}
 			Right((removal, addition)) => {
 				render!(tab.selected.remove_many(&removal) > 0);
-				render!(tab.selected.add_many(&addition), > 0) != addition.len()
+				addition.len() != render!(tab.selected.add_many(&addition), > 0)
 			}
 		};
 
 		if warn {
-			AppProxy::notify_warn(
+			NotifyProxy::push_warn(
 				"Toggle all",
-				"Some files cannot be selected, due to path nesting conflict.",
+				"Some files cannot be selected due to path nesting conflict.",
 			);
 		}
 		succ!();

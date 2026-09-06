@@ -1,27 +1,35 @@
 use anyhow::{Result, anyhow};
-use scopeguard::defer;
 use tokio::{io::{AsyncBufReadExt, BufReader}, select, sync::mpsc};
-use yazi_proxy::{AppProxy, HIDER};
+use yazi_binding::Permit;
+use yazi_term::YIELD_TO_SUBPROCESS;
 
 use super::{ProcessInBg, ProcessInBlock, ProcessInOrphan, ShellOpt};
-use crate::{TaskOp, TaskOps, process::{ProcessOutBg, ProcessOutBlock, ProcessOutOrphan}};
+use crate::{AppProxy, NotifyProxy, TaskOp, TaskOps, process::{ProcessIn, ProcessOutBg, ProcessOutBlock, ProcessOutOrphan}};
 
 pub(crate) struct Process {
 	ops: TaskOps,
+	tx:  async_priority_channel::Sender<ProcessIn, u8>,
 }
 
 impl Process {
-	pub(crate) fn new(tx: &mpsc::UnboundedSender<TaskOp>) -> Self { Self { ops: tx.into() } }
+	pub(crate) fn new(
+		ops: &mpsc::UnboundedSender<TaskOp>,
+		tx: async_priority_channel::Sender<ProcessIn, u8>,
+	) -> Self {
+		Self { ops: ops.into(), tx }
+	}
 
 	pub(crate) async fn block(&self, task: ProcessInBlock) -> Result<(), ProcessOutBlock> {
-		let _permit = HIDER.acquire().await.unwrap();
-		defer!(AppProxy::resume());
+		let _permit = Permit::new(YIELD_TO_SUBPROCESS.acquire().await.unwrap(), AppProxy::resume());
 		AppProxy::stop().await;
 
 		let (id, cmd) = (task.id, task.cmd.clone());
 		let result = super::shell(task.into()).await;
 		if let Err(e) = result {
-			AppProxy::notify_warn(&cmd.to_string_lossy(), format!("Failed to start process: {e}"));
+			NotifyProxy::push_warn(
+				cmd.to_string_lossy().into_owned(),
+				format!("Failed to start process: {e}"),
+			);
 			return Ok(self.ops.out(id, ProcessOutBlock::Succ));
 		}
 
@@ -32,7 +40,7 @@ impl Process {
 				Some(code) => format!("Process exited with status code: {code}"),
 				None => "Process terminated by signal".to_string(),
 			};
-			AppProxy::notify_warn(&cmd.to_string_lossy(), &content);
+			NotifyProxy::push_warn(cmd.to_string_lossy().into_owned(), content);
 		}
 
 		Ok(self.ops.out(id, ProcessOutBlock::Succ))
@@ -46,32 +54,21 @@ impl Process {
 	}
 
 	pub(crate) async fn bg(&self, task: ProcessInBg) -> Result<(), ProcessOutBg> {
-		let mut child = super::shell(ShellOpt {
-			cwd:    task.cwd,
-			cmd:    task.cmd,
-			args:   task.args,
-			piped:  true,
-			orphan: false,
-		})
-		.await?;
+		let mut child =
+			super::shell(ShellOpt { cwd: task.cwd, cmd: task.cmd, block: false, orphan: false }).await?;
 
 		let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
 		let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
-		let mut cancel = task.cancel;
 		loop {
 			select! {
-				_ = cancel.recv() => {
-					child.start_kill().ok();
-					cancel.close();
-					break;
-				}
 				Ok(Some(line)) = stdout.next_line() => {
 					self.ops.out(task.id, ProcessOutBg::Log(line));
 				}
 				Ok(Some(line)) = stderr.next_line() => {
 					self.ops.out(task.id, ProcessOutBg::Log(line));
 				}
-				Ok(status) = child.wait() => {
+				status = child.wait() => {
+					let status = status.map_err(anyhow::Error::from)?;
 					self.ops.out(task.id, ProcessOutBg::Log(match status.code() {
 						Some(code) => format!("Exited with status code: {code}"),
 						None => "Process terminated by signal".to_string(),
@@ -85,5 +82,12 @@ impl Process {
 		}
 
 		Ok(self.ops.out(task.id, ProcessOutBg::Succ))
+	}
+}
+
+impl Process {
+	#[inline]
+	pub(crate) fn submit(&self, r#in: impl Into<ProcessIn>, priority: u8) {
+		_ = self.tx.try_send(r#in.into(), priority);
 	}
 }

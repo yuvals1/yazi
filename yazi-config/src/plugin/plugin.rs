@@ -1,138 +1,54 @@
 use anyhow::Result;
-use hashbrown::HashSet;
-use serde::Deserialize;
-use tracing::warn;
+use serde::{Deserialize, de};
 use yazi_codegen::DeserializeOver2;
-use yazi_fs::File;
-use yazi_shared::url::UrlBuf;
+use yazi_shim::toml::DeserializeOverHook;
 
-use super::{Fetcher, Preloader, Previewer, Spotter};
-use crate::{Preset, plugin::MAX_PREWORKERS};
+use super::{Fetcher, Fetchers, Preloader, Preloaders, Previewer, Previewers, Spotter, Spotters};
+use crate::{mix, plugin::{FetcherArc, PreloaderArc, PreviewerArc, SpotterArc}};
 
 #[derive(Default, Deserialize, DeserializeOver2)]
 pub struct Plugin {
-	pub fetchers:     Vec<Fetcher>,
+	pub fetchers:     Fetchers,
 	#[serde(default)]
 	prepend_fetchers: Vec<Fetcher>,
 	#[serde(default)]
 	append_fetchers:  Vec<Fetcher>,
 
-	pub spotters:     Vec<Spotter>,
+	pub spotters:     Spotters,
 	#[serde(default)]
 	prepend_spotters: Vec<Spotter>,
 	#[serde(default)]
 	append_spotters:  Vec<Spotter>,
 
-	pub preloaders:     Vec<Preloader>,
+	pub preloaders:     Preloaders,
 	#[serde(default)]
 	prepend_preloaders: Vec<Preloader>,
 	#[serde(default)]
 	append_preloaders:  Vec<Preloader>,
 
-	pub previewers:     Vec<Previewer>,
+	pub previewers:     Previewers,
 	#[serde(default)]
 	prepend_previewers: Vec<Previewer>,
 	#[serde(default)]
 	append_previewers:  Vec<Previewer>,
 }
 
-impl Plugin {
-	pub fn fetchers<'a, 'b: 'a>(
-		&'b self,
-		url: &'a UrlBuf,
-		mime: &'a str,
-	) -> impl Iterator<Item = &'b Fetcher> + 'a {
-		let mut seen = HashSet::new();
-		self.fetchers.iter().filter(move |&f| {
-			if seen.contains(&f.id) || !f.matches(url, mime) {
-				return false;
-			}
-			seen.insert(&f.id);
-			true
-		})
-	}
-
-	pub fn mime_fetchers(&self, files: Vec<File>) -> impl Iterator<Item = (&Fetcher, Vec<File>)> {
-		let mut tasks: [Vec<_>; MAX_PREWORKERS as usize] = Default::default();
-		for f in files {
-			let found = self.fetchers.iter().find(|&g| g.id == "mime" && g.matches(&f.url, ""));
-			if let Some(g) = found {
-				tasks[g.idx as usize].push(f);
-			} else {
-				warn!("No mime fetcher for {f:?}");
-			}
-		}
-
-		tasks.into_iter().enumerate().filter_map(|(i, tasks)| {
-			if tasks.is_empty() { None } else { Some((&self.fetchers[i], tasks)) }
-		})
-	}
-
-	pub fn spotter(&self, url: &UrlBuf, mime: &str) -> Option<&Spotter> {
-		self.spotters.iter().find(|&p| p.matches(url, mime))
-	}
-
-	pub fn preloaders<'a, 'b: 'a>(
-		&'b self,
-		url: &'a UrlBuf,
-		mime: &'a str,
-	) -> impl Iterator<Item = &'b Preloader> + 'a {
-		let mut next = true;
-		self.preloaders.iter().filter(move |&p| {
-			if !next || !p.matches(url, mime) {
-				return false;
-			}
-			next = p.next;
-			true
-		})
-	}
-
-	pub fn previewer(&self, url: &UrlBuf, mime: &str) -> Option<&Previewer> {
-		self.previewers.iter().find(|&p| p.matches(url, mime))
-	}
-}
-
-impl Plugin {
-	// TODO: remove .retain() and .collect()
-	pub(crate) fn reshape(mut self) -> Result<Self> {
-		if self.append_spotters.iter().any(|r| r.any_file()) {
-			self.spotters.retain(|r| !r.any_file());
-		}
-		if self.append_spotters.iter().any(|r| r.any_dir()) {
-			self.spotters.retain(|r| !r.any_dir());
-		}
-		if self.append_previewers.iter().any(|r| r.any_file()) {
-			self.previewers.retain(|r| !r.any_file());
-		}
-		if self.append_previewers.iter().any(|r| r.any_dir()) {
-			self.previewers.retain(|r| !r.any_dir());
-		}
-
-		self.fetchers =
-			Preset::mix(self.prepend_fetchers, self.fetchers, self.append_fetchers).collect();
-		self.spotters =
-			Preset::mix(self.prepend_spotters, self.spotters, self.append_spotters).collect();
-		self.preloaders =
-			Preset::mix(self.prepend_preloaders, self.preloaders, self.append_preloaders).collect();
-		self.previewers =
-			Preset::mix(self.prepend_previewers, self.previewers, self.append_previewers).collect();
-
-		if self.fetchers.len() + self.preloaders.len() > MAX_PREWORKERS as usize {
-			panic!("Fetchers and preloaders exceed the limit of {MAX_PREWORKERS}");
-		}
-
-		for (i, p) in self.fetchers.iter_mut().enumerate() {
-			p.idx = i as u8;
-		}
-		for (i, p) in self.preloaders.iter_mut().enumerate() {
-			p.idx = self.fetchers.len() as u8 + i as u8;
-		}
+impl DeserializeOverHook for Plugin {
+	fn deserialize_over_hook(self) -> Result<Self, toml::de::Error> {
+		let fetchers: Vec<FetcherArc> =
+			mix(self.prepend_fetchers, self.fetchers.unwrap_unchecked(), self.append_fetchers);
+		let spotters: Vec<SpotterArc> =
+			mix(self.prepend_spotters, self.spotters.unwrap_unchecked(), self.append_spotters);
+		let preloaders: Vec<PreloaderArc> =
+			mix(self.prepend_preloaders, self.preloaders.unwrap_unchecked(), self.append_preloaders);
+		let previewers: Vec<PreviewerArc> =
+			mix(self.prepend_previewers, self.previewers.unwrap_unchecked(), self.append_previewers);
 
 		Ok(Self {
-			fetchers: self.fetchers,
-			spotters: self.spotters,
-			preloaders: self.preloaders,
-			previewers: self.previewers,
+			fetchers: fetchers.try_into().map_err(de::Error::custom)?,
+			spotters: spotters.into(),
+			preloaders: preloaders.try_into().map_err(de::Error::custom)?,
+			previewers: previewers.into(),
 			..Default::default()
 		})
 	}

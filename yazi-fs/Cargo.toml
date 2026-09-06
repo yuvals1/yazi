@@ -1,44 +1,67 @@
 [package]
-name        = "yazi-fs"
-version     = "25.6.11"
-edition     = "2024"
-license     = "MIT"
-authors     = [ "sxyazi <sxyazi@gmail.com>" ]
-description = "Yazi file system"
-homepage    = "https://yazi-rs.github.io"
-repository  = "https://github.com/sxyazi/yazi"
+name                   = "yazi-fs"
+description            = "Yazi file system"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+cfg_aliases = "0.2.2"
 
 [dependencies]
-yazi-ffi    = { path = "../yazi-ffi", version = "25.6.11" }
-yazi-macro  = { path = "../yazi-macro", version = "25.6.11" }
-yazi-shared = { path = "../yazi-shared", version = "25.6.11" }
+yazi-binding = { path = "../yazi-binding", version = "26.9.1" }
+yazi-codegen = { path = "../yazi-codegen", version = "26.9.1" }
+yazi-ffi     = { path = "../yazi-ffi", version = "26.9.1" }
+yazi-macro   = { path = "../yazi-macro", version = "26.9.1" }
+yazi-shared  = { path = "../yazi-shared", version = "26.9.1" }
+yazi-shim    = { path = "../yazi-shim", version = "26.9.1" }
 
 # External dependencies
-anyhow      = { workspace = true }
-arc-swap    = "1.7.1"
-bitflags    = { workspace = true }
-dirs        = { workspace = true }
-foldhash    = { workspace = true }
-futures     = { workspace = true }
-hashbrown   = { workspace = true }
-parking_lot = { workspace = true }
-regex       = { workspace = true }
-scopeguard  = { workspace = true }
-serde       = { workspace = true }
-tokio       = { workspace = true }
-tracing     = { workspace = true }
+anyhow                = { workspace = true }
+arc-swap              = { workspace = true }
+bitflags              = { workspace = true }
+data-encoding         = { workspace = true }
+dirs                  = { workspace = true }
+either                = { workspace = true }
+foldhash              = { workspace = true }
+hashbrown             = { workspace = true }
+inventory             = { workspace = true }
+libc                  = { workspace = true }
+mlua                  = { workspace = true }
+parking_lot           = { workspace = true }
+rand                  = { workspace = true }
+regex                 = { workspace = true }
+regex-syntax          = { workspace = true }
+scopeguard            = { workspace = true }
+serde                 = { workspace = true }
+serde_with            = { workspace = true }
+strum                 = { workspace = true }
+tokio                 = { workspace = true }
+typed-path            = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [target."cfg(unix)".dependencies]
-libc  = { workspace = true }
 uzers = { workspace = true }
 
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+percent-encoding = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60.2", features = [ "Win32_Storage_FileSystem" ] }
+windows     = { version = "0.62.2", features = [ "Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_System_Com_StructuredStorage", "Win32_System_SystemServices", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem" ] }
+windows-sys = { version = "0.61.2", features = [ "Win32_Storage_FileSystem" ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation-sys = { workspace = true }
-objc                = { workspace = true }
-plist              = "1.7.4"
+ds_parser           = "0.4.0"
+objc2               = { workspace = true }
+plist               = "1.7.4"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-trash = "5.2.3"
+trash = "5.2.6"

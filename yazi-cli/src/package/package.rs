@@ -2,8 +2,8 @@ use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use yazi_fs::{Xdg, provider::local::Local};
-use yazi_macro::outln;
+use yazi_fs::{Xdg, engine::{Engine, local::Local}};
+use yazi_macro::{ok_or_not_found, outln};
 
 use super::Dependency;
 
@@ -15,11 +15,8 @@ pub(crate) struct Package {
 
 impl Package {
 	pub(crate) async fn load() -> Result<Self> {
-		Ok(match Local::read_to_string(Self::toml()).await {
-			Ok(s) => toml::from_str(&s)?,
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-			Err(e) => Err(e)?,
-		})
+		let s = ok_or_not_found!(Local::regular(&Self::toml()).read_to_string().await);
+		Ok(toml::from_str(&s)?)
 	}
 
 	pub(crate) async fn add_many(&mut self, uses: &[String]) -> Result<()> {
@@ -31,19 +28,19 @@ impl Package {
 		Ok(())
 	}
 
-	pub(crate) async fn delete_many(&mut self, uses: &[String]) -> Result<()> {
+	pub(crate) async fn delete_many(&mut self, uses: &[String], discard: bool) -> Result<()> {
 		for u in uses {
-			let r = self.delete(u).await;
+			let r = self.delete(u, discard).await;
 			self.save().await?;
 			r?;
 		}
 		Ok(())
 	}
 
-	pub(crate) async fn install(&mut self) -> Result<()> {
+	pub(crate) async fn install(&mut self, discard: bool) -> Result<()> {
 		macro_rules! go {
 			($dep:expr) => {
-				let r = $dep.install().await;
+				let r = $dep.install(discard).await;
 				self.save().await?;
 				r?;
 			};
@@ -58,11 +55,11 @@ impl Package {
 		Ok(())
 	}
 
-	pub(crate) async fn upgrade_many(&mut self, uses: &[String]) -> Result<()> {
+	pub(crate) async fn upgrade_many(&mut self, uses: &[String], discard: bool) -> Result<()> {
 		macro_rules! go {
 			($dep:expr) => {
 				if uses.is_empty() || uses.contains(&$dep.r#use) {
-					let r = $dep.upgrade().await;
+					let r = $dep.upgrade(discard).await;
 					self.save().await?;
 					r?;
 				}
@@ -110,7 +107,7 @@ impl Package {
 			)
 		}
 
-		dep.add().await?;
+		dep.add(false).await?;
 		if dep.is_flavor {
 			self.flavors.push(dep);
 		} else {
@@ -119,12 +116,12 @@ impl Package {
 		Ok(())
 	}
 
-	async fn delete(&mut self, r#use: &str) -> Result<()> {
+	async fn delete(&mut self, r#use: &str, discard: bool) -> Result<()> {
 		let Some(dep) = self.identical(&Dependency::from_str(r#use)?).cloned() else {
 			bail!("`{}` was not found in package.toml", r#use)
 		};
 
-		dep.delete().await?;
+		dep.delete(discard).await?;
 		if dep.is_flavor {
 			self.flavors.retain(|d| !d.identical(&dep));
 		} else {
@@ -135,7 +132,7 @@ impl Package {
 
 	async fn save(&self) -> Result<()> {
 		let s = toml::to_string_pretty(self)?;
-		Local::write(Self::toml(), s).await.context("Failed to write package.toml")
+		Local::regular(&Self::toml()).write(s).await.context("Failed to write package.toml")
 	}
 
 	fn toml() -> PathBuf { Xdg::config_dir().join("package.toml") }

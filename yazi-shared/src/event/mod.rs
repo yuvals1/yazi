@@ -1,5 +1,3 @@
-#![allow(clippy::module_inception)]
+yazi_macro::mod_flat!(action action_cow actions channel cmd de de_owned event replier);
 
-yazi_macro::mod_flat!(cmd cow data event);
-
-pub static NEED_RENDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static NEED_RENDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);

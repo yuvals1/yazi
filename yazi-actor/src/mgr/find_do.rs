@@ -1,19 +1,19 @@
 use anyhow::Result;
 use yazi_core::tab::Finder;
 use yazi_macro::{act, render, succ};
-use yazi_parser::mgr::FindDoOpt;
-use yazi_shared::event::Data;
+use yazi_parser::mgr::FindDoForm;
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct FindDo;
 
 impl Actor for FindDo {
-	type Options = FindDoOpt;
+	type Form = FindDoForm;
 
 	const NAME: &str = "find_do";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, Self::Form { opt }: Self::Form) -> Result<Data> {
 		if opt.query.is_empty() {
 			return act!(mgr:escape_find, cx);
 		}
@@ -24,9 +24,9 @@ impl Actor for FindDo {
 		}
 
 		let step = if opt.prev {
-			finder.prev(&cx.current().files, cx.current().cursor, true)
+			finder.prev(&cx.current().entries, cx.current().cursor, true)
 		} else {
-			finder.next(&cx.current().files, cx.current().cursor, true)
+			finder.next(&cx.current().entries, cx.current().cursor, true)
 		};
 
 		if let Some(step) = step {

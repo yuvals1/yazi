@@ -1,12 +1,14 @@
-use std::str::FromStr;
+use std::{fmt::Debug, str::FromStr};
 
-use anyhow::Result;
-use globset::GlobBuilder;
-use serde::Deserialize;
-use yazi_shared::{scheme::{SchemeCow, SchemeRef}, url::UrlBuf};
+use anyhow::{Result, bail};
+use globset::{Candidate, GlobBuilder};
+use serde_with::DeserializeFromStr;
+use strum::EnumIs;
+use yazi_shared::{auth::Auth, url::AsUrl};
 
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "String")]
+use crate::Mixable;
+
+#[derive(Clone, DeserializeFromStr)]
 pub struct Pattern {
 	inner:      globset::GlobMatcher,
 	scheme:     PatternScheme,
@@ -16,40 +18,48 @@ pub struct Pattern {
 	sep_lit:    bool,
 }
 
+impl Debug for Pattern {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Pattern")
+			.field("regex", &self.inner.glob().regex())
+			.field("scheme", &self.scheme)
+			.field("is_dir", &self.is_dir)
+			.field("is_star", &self.is_star)
+			.finish()
+	}
+}
+
 impl Pattern {
-	pub fn match_url(&self, url: impl AsRef<UrlBuf>, is_dir: bool) -> bool {
-		let url = url.as_ref();
+	pub fn match_url(&self, url: impl AsUrl, is_dir: bool) -> bool {
+		let url = url.as_url();
 
 		if is_dir != self.is_dir {
 			return false;
+		} else if !self.scheme.matches(url.auth()) {
+			return false;
 		} else if self.is_star {
 			return true;
-		} else if !self.scheme.matches(&url.scheme) {
-			return false;
 		}
 
 		#[cfg(unix)]
-		let path = &url.loc;
+		{
+			self.inner.is_match_candidate(&Candidate::from_bytes(url.loc().encoded_bytes()))
+		}
 
 		#[cfg(windows)]
-		let path = if self.sep_lit {
-			yazi_fs::path::backslash_to_slash(&url.loc)
+		if self.sep_lit {
+			use yazi_shared::strand::{AsStrand, StrandLike};
+			self.inner.is_match_candidate(&Candidate::from_bytes(
+				url.loc().as_strand().backslash_to_slash().encoded_bytes(),
+			))
 		} else {
-			std::borrow::Cow::Borrowed(url.loc.as_path())
-		};
-
-		self.inner.is_match(path)
+			self.inner.is_match_candidate(&Candidate::from_bytes(url.loc().encoded_bytes()))
+		}
 	}
 
-	pub fn match_mime(&self, mime: impl AsRef<str>) -> bool {
+	pub(crate) fn match_mime(&self, mime: impl AsRef<str>) -> bool {
 		self.is_star || (!mime.as_ref().is_empty() && self.inner.is_match(mime.as_ref()))
 	}
-
-	#[inline]
-	pub fn any_file(&self) -> bool { self.is_star && !self.is_dir }
-
-	#[inline]
-	pub fn any_dir(&self) -> bool { self.is_star && self.is_dir }
 }
 
 impl FromStr for Pattern {
@@ -88,48 +98,70 @@ impl FromStr for Pattern {
 	}
 }
 
-impl TryFrom<String> for Pattern {
-	type Error = anyhow::Error;
+impl Mixable for Pattern {
+	fn any_file(&self) -> bool { self.is_star && !self.is_dir && self.scheme.is_any() }
 
-	fn try_from(s: String) -> Result<Self, Self::Error> { Self::from_str(s.as_str()) }
+	fn any_dir(&self) -> bool { self.is_star && self.is_dir && self.scheme.is_any() }
 }
 
 // --- Scheme
-#[derive(Debug)]
-struct PatternScheme(Option<&'static str>);
+#[derive(Clone, Debug, EnumIs)]
+enum PatternScheme {
+	Any,
+	Local,
+	Remote,
+	Virtual,
+
+	Custom(String),
+}
 
 impl PatternScheme {
 	fn parse(s: &str) -> Result<(Self, usize)> {
-		let mut me = Self(None);
-		let Some((protocol, _)) = s.split_once("://") else {
-			return Ok((me, 0));
+		let Some((s, _)) = s.split_once("://") else {
+			return Ok((Self::Any, 0));
 		};
 
-		if protocol != "*" {
-			me.0 = Some(SchemeCow::parse_kind(protocol.as_bytes())?);
-		}
+		let scheme = match s {
+			"*" => Self::Any,
+			"local" => Self::Local,
+			"remote" => Self::Remote,
+			"virtual" => Self::Virtual,
 
-		Ok((me, protocol.len() + 3))
+			"" => bail!("Invalid URL pattern: scheme is empty"),
+			other => Self::Custom(other.to_owned()),
+		};
+
+		Ok((scheme, s.len() + 3))
 	}
 
 	#[inline]
-	fn matches<'a>(&self, scheme: impl Into<SchemeRef<'a>>) -> bool {
-		self.0.is_none_or(|s| s == scheme.into().kind())
+	fn matches(&self, auth: &Auth) -> bool {
+		match self {
+			Self::Any => true,
+			Self::Local => auth.kind.is_local(),
+			Self::Remote => auth.kind.is_remote(),
+			Self::Virtual => auth.kind.is_virtual(),
+			Self::Custom(name) => auth.scheme == name,
+		}
 	}
 }
 
 // --- Tests
 #[cfg(test)]
 mod tests {
+	use yazi_shared::url::UrlCow;
+
 	use super::*;
 
 	fn matches(glob: &str, url: &str) -> bool {
-		Pattern::from_str(glob).unwrap().match_url(UrlBuf::from_str(url).unwrap(), false)
+		Pattern::from_str(glob).unwrap().match_url(UrlCow::try_from(url).unwrap(), false)
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn test_unix() {
+		yazi_shared::init_tests();
+
 		// Wildcard
 		assert!(matches("*", "/foo"));
 		assert!(matches("*", "/foo/bar"));
@@ -164,6 +196,8 @@ mod tests {
 	#[cfg(windows)]
 	#[test]
 	fn test_windows() {
+		yazi_shared::init_tests();
+
 		// Wildcard
 		assert!(matches("*", r#"C:\foo"#));
 		assert!(matches("*", r#"C:\foo\bar"#));

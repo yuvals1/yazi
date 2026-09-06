@@ -1,42 +1,33 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
-use yazi_plugin::isolate;
+use yazi_runner::RUNNER;
 
-use super::PluginInEntry;
-use crate::{HIGH, TaskIn, TaskOp, TaskOps, plugin::PluginOutEntry};
+use crate::{TaskOp, TaskOps, plugin::{PluginIn, PluginInEntry, PluginOutEntry}};
 
 pub(crate) struct Plugin {
-	ops:     TaskOps,
-	r#macro: async_priority_channel::Sender<TaskIn, u8>,
+	ops: TaskOps,
+	tx:  async_priority_channel::Sender<PluginIn, u8>,
 }
 
 impl Plugin {
 	pub(crate) fn new(
-		tx: &mpsc::UnboundedSender<TaskOp>,
-		r#macro: &async_priority_channel::Sender<TaskIn, u8>,
+		ops: &mpsc::UnboundedSender<TaskOp>,
+		tx: async_priority_channel::Sender<PluginIn, u8>,
 	) -> Self {
-		Self { ops: tx.into(), r#macro: r#macro.clone() }
+		Self { ops: ops.into(), tx }
 	}
 
-	pub(crate) async fn micro(&self, task: PluginInEntry) -> Result<(), PluginOutEntry> {
-		isolate::entry(task.opt).await?;
-		self.ops.out(task.id, PluginOutEntry::Succ);
-		Ok(())
-	}
+	pub(crate) async fn entry(&self, task: PluginInEntry) -> Result<(), PluginOutEntry> {
+		let id = task.id;
 
-	pub(crate) fn r#macro(&self, task: PluginInEntry) -> Result<(), PluginOutEntry> {
-		Ok(self.queue(task, HIGH))
-	}
-
-	pub(crate) async fn macro_do(&self, task: PluginInEntry) -> Result<(), PluginOutEntry> {
-		isolate::entry(task.opt).await?;
-		Ok(self.ops.out(task.id, PluginOutEntry::Succ))
+		RUNNER.entry(task.into()).await?;
+		Ok(self.ops.out(id, PluginOutEntry::Succ))
 	}
 }
 
 impl Plugin {
 	#[inline]
-	fn queue(&self, r#in: impl Into<TaskIn>, priority: u8) {
-		_ = self.r#macro.try_send(r#in.into(), priority);
+	pub(crate) fn submit(&self, r#in: impl Into<PluginIn>, priority: u8) {
+		_ = self.tx.try_send(r#in.into(), priority);
 	}
 }

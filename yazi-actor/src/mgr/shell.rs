@@ -1,54 +1,57 @@
 use std::borrow::Cow;
 
 use anyhow::Result;
-use yazi_config::{opener::OpenerRule, popup::InputCfg};
-use yazi_macro::{act, succ};
-use yazi_parser::mgr::ShellOpt;
-use yazi_proxy::{InputProxy, TasksProxy};
-use yazi_shared::event::Data;
+use yazi_config::YAZI;
+use yazi_core::mgr::MgrSnap;
+use yazi_fs::Splatter;
+use yazi_macro::{act, input, succ};
+use yazi_parser::mgr::ShellForm;
+use yazi_proxy::TasksProxy;
+use yazi_scheduler::process::ShellOpt;
+use yazi_shared::data::Data;
+use yazi_widgets::input::InputEvent;
 
 use crate::{Actor, Ctx};
 
 pub struct Shell;
 
 impl Actor for Shell {
-	type Options = ShellOpt;
+	type Form = ShellForm;
 
 	const NAME: &str = "shell";
 
-	fn act(cx: &mut Ctx, mut opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, mut form: Self::Form) -> Result<Data> {
 		act!(mgr:escape_visual, cx)?;
 
-		let cwd = opt.cwd.take().unwrap_or(cx.cwd().into()).into_owned();
-		let selected = cx.tab().hovered_and_selected().cloned().collect();
+		let cwd = form.cwd.take().unwrap_or_else(|| cx.cwd().clone());
+		let snap = MgrSnap::from(&cx.mgr);
 
-		let input = opt.interactive.then(|| {
-			InputProxy::show(InputCfg::shell(opt.block).with_value(&*opt.run).with_cursor(opt.cursor))
-		});
+		let input = if form.interactive {
+			Some(input!(
+				cx,
+				YAZI.input.shell(form.block).with_value(&*form.run).with_cursor(form.cursor)
+			)?)
+		} else {
+			None
+		};
 
 		tokio::spawn(async move {
 			if let Some(mut rx) = input {
 				match rx.recv().await {
-					Some(Ok(e)) => opt.run = Cow::Owned(e),
+					Some(InputEvent::Submit(e)) => form.run = Cow::Owned(e),
 					_ => return,
 				}
 			}
-			if opt.run.is_empty() {
+			if form.run.is_empty() {
 				return;
 			}
 
-			TasksProxy::open_with(
-				Cow::Owned(OpenerRule {
-					run:    opt.run.into_owned(),
-					block:  opt.block,
-					orphan: opt.orphan,
-					desc:   Default::default(),
-					r#for:  None,
-					spread: true,
-				}),
+			TasksProxy::process_open(ShellOpt {
 				cwd,
-				selected,
-			);
+				cmd: Splatter::new(snap).splat(&*form.run),
+				block: form.block,
+				orphan: form.orphan,
+			});
 		});
 
 		succ!();

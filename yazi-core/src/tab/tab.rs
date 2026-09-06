@@ -1,12 +1,13 @@
-use std::iter;
+use std::borrow::Cow;
 
 use anyhow::Result;
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 use tokio::task::JoinHandle;
-use yazi_adapter::Dimension;
-use yazi_config::{LAYOUT, popup::{Origin, Position}};
-use yazi_fs::File;
-use yazi_shared::{Id, Ids, url::UrlBuf};
+use yazi_binding::position::{Origin, Position};
+use yazi_config::LAYOUT;
+use yazi_fs::file::File;
+use yazi_shared::{id::{Id, Ids}, url::{UrlBuf, UrlLike}};
+use yazi_term::TERM;
 
 use super::{Backstack, Finder, Folder, History, Mode, Preference, Preview};
 use crate::{spot::Spot, tab::Selected};
@@ -63,14 +64,25 @@ impl Tab {
 	#[inline]
 	pub fn cwd(&self) -> &UrlBuf { &self.current.url }
 
+	pub fn name(&self) -> Cow<'_, str> {
+		let url = &self.current.url;
+		if !self.pref.name.is_empty() {
+			Cow::Borrowed(&self.pref.name)
+		} else if let Some(s) = url.name() {
+			s.to_string_lossy()
+		} else {
+			url.loc().to_string_lossy()
+		}
+	}
+
 	#[inline]
 	pub fn hovered(&self) -> Option<&File> { self.current.hovered() }
 
 	#[inline]
-	pub fn hovered_mut(&mut self) -> Option<&mut File> { self.current.hovered_mut() }
+	pub fn hovered_url(&self) -> Option<&UrlBuf> { self.current.hovered_url() }
 
-	pub fn hovered_rect(&self) -> Option<Rect> {
-		let y = self.current.files.position(self.hovered()?.urn())? - self.current.offset;
+	fn hovered_rect(&self) -> Option<Rect> {
+		let y = self.current.entries.position(self.hovered()?.key())? - self.current.offset;
 
 		let mut rect = LAYOUT.get().current;
 		rect.y = rect.y.saturating_sub(1) + y as u16;
@@ -78,29 +90,28 @@ impl Tab {
 		Some(rect)
 	}
 
-	pub fn hovered_rect_based(&self, pos: Position) -> Rect {
-		let ws = Dimension::available().into();
+	pub(crate) fn hovered_rect_based(&self, pos: Position) -> Rect {
+		let area = TERM.dimension().area();
 		if let Some(r) = self.hovered_rect() {
-			Position::sticky(ws, r, pos.offset)
+			pos.sticky(r, area)
 		} else {
-			Position::new(Origin::TopCenter, pos.offset).rect(ws)
+			Position::new(Origin::TopCenter, pos.offset).rect(area)
 		}
 	}
 
-	pub fn selected_or_hovered(&self) -> Box<dyn Iterator<Item = &UrlBuf> + '_> {
+	pub fn selected_or_hovered_files(&self) -> Box<dyn Iterator<Item = &File> + '_> {
 		if self.selected.is_empty() {
-			Box::new(self.hovered().map(|h| &h.url).into_iter())
+			Box::new(self.hovered().into_iter())
 		} else {
-			Box::new(self.selected.values())
+			Box::new(self.selected.files())
 		}
 	}
 
-	pub fn hovered_and_selected(&self) -> Box<dyn Iterator<Item = &UrlBuf> + '_> {
-		let Some(h) = self.hovered() else { return Box::new(iter::empty()) };
+	pub fn selected_or_hovered_urls(&self) -> Box<dyn Iterator<Item = &UrlBuf> + '_> {
 		if self.selected.is_empty() {
-			Box::new([&h.url, &h.url].into_iter())
+			Box::new(self.hovered_url().into_iter())
 		} else {
-			Box::new([&h.url].into_iter().chain(self.selected.values()))
+			Box::new(self.selected.urls())
 		}
 	}
 

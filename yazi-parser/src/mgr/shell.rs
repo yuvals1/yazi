@@ -1,33 +1,30 @@
 use anyhow::bail;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{SStr, event::{CmdCow, Data}, url::UrlCow};
+use serde::Deserialize;
+use yazi_shared::{event::ActionCow, url::UrlBuf};
+use yazi_shim::SStr;
 
-#[derive(Debug)]
-pub struct ShellOpt {
+#[derive(Debug, Deserialize)]
+pub struct ShellForm {
+	#[serde(default, alias = "0")]
 	pub run: SStr,
-	pub cwd: Option<UrlCow<'static>>,
+	pub cwd: Option<UrlBuf>,
 
+	#[serde(default)]
 	pub block:       bool,
+	#[serde(default)]
 	pub orphan:      bool,
+	#[serde(default)]
 	pub interactive: bool,
 
 	pub cursor: Option<usize>,
 }
 
-impl TryFrom<CmdCow> for ShellOpt {
+impl TryFrom<ActionCow> for ShellForm {
 	type Error = anyhow::Error;
 
-	fn try_from(mut c: CmdCow) -> Result<Self, Self::Error> {
-		let me = Self {
-			run: c.take_first_str().unwrap_or_default(),
-			cwd: c.take_url("cwd"),
-
-			block:       c.bool("block"),
-			orphan:      c.bool("orphan"),
-			interactive: c.bool("interactive"),
-
-			cursor: c.get("cursor").and_then(Data::as_usize),
-		};
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> {
+		let me: Self = a.deserialize()?;
 
 		if me.cursor.is_some_and(|c| c > me.run.chars().count()) {
 			bail!("The cursor position is out of bounds.");
@@ -37,10 +34,10 @@ impl TryFrom<CmdCow> for ShellOpt {
 	}
 }
 
-impl FromLua for ShellOpt {
+impl FromLua for ShellForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for ShellOpt {
+impl IntoLua for ShellForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

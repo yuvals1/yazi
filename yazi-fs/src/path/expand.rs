@@ -1,42 +1,71 @@
-use std::{borrow::Cow, ffi::{OsStr, OsString}, path::{Path, PathBuf}};
+use std::borrow::Cow;
 
-use yazi_shared::{loc::LocBuf, url::{Url, UrlBuf, UrlCow}};
-
-use crate::{CWD, path::clean_url};
+use yazi_shared::{loc::LocBuf, path::{Component, PathBufDyn, PathCow, PathKind, PathLike}, url::{AsUrl, Url, UrlBuf, UrlCow, UrlLike}};
+use yazi_shim::wtf8::FromWtf8Vec;
 
 #[inline]
-pub fn expand_url<'a>(url: impl Into<UrlCow<'a>>) -> UrlBuf {
-	clean_url(expand_url_impl(url.into().as_url()))
-}
+pub fn expand_url<'a>(url: impl Into<UrlCow<'a>>) -> UrlCow<'a> { expand_url_impl(url.into()) }
 
-fn expand_url_impl<'a>(url: Url<'a>) -> UrlCow<'a> {
-	let (o_base, o_rest, o_urn) = url.loc.triple();
+fn expand_url_impl(url: UrlCow) -> UrlCow {
+	let (base, rest, urn) = url.triple();
 
-	let n_base = expand_variables(o_base);
-	let n_rest = expand_variables(o_rest);
-	let n_urn = expand_variables(o_urn);
-
-	let rest_diff = n_rest.components().count() as isize - o_rest.components().count() as isize;
-	let urn_diff = n_urn.components().count() as isize - o_urn.components().count() as isize;
-
-	let uri_count = url.uri().count() as isize;
-	let urn_count = url.urn().count() as isize;
-
-	let loc = LocBuf::with(
-		PathBuf::from_iter([n_base, n_rest, n_urn]),
-		(uri_count + rest_diff + urn_diff) as usize,
-		(urn_count + urn_diff) as usize,
-	)
-	.expect("Failed to create Loc from expanded path");
-
-	let url = UrlBuf { loc, scheme: url.scheme.into() };
-	match absolute_url(url.as_url()) {
-		UrlCow::Borrowed { .. } => url.into(),
-		c @ UrlCow::Owned { .. } => c.into_owned().into(),
+	let base = expand_variables(base.into());
+	let rest = expand_variables(rest.into());
+	let urn = expand_variables(urn.into());
+	if base.is_borrowed() && rest.is_borrowed() && urn.is_borrowed() {
+		return url;
 	}
+
+	let mut path = PathBufDyn::with_capacity(url.kind(), base.len() + rest.len() + urn.len());
+	path.try_push(&base).expect("push original base should not fail");
+	let c_base = path.components().count();
+
+	path.try_push(&rest).expect("push original URI should not fail");
+	let c_trail = path.components().count();
+
+	path.try_push(&urn).expect("push original URN should not fail");
+	let c_full = path.components().count();
+
+	let uri = if urn.has_prefix() || rest.has_prefix() {
+		c_full
+	} else if urn.has_root() || rest.has_root() {
+		c_full - c_base.min(path.has_prefix() as usize)
+	} else {
+		c_full - c_base
+	};
+	let urn = if urn.has_prefix() || urn.has_root() {
+		path.components().rev().take_while(|&c| c != Component::RootDir).count()
+	} else {
+		c_full - c_trail
+	};
+
+	match url.as_url() {
+		Url::Regular(_) => UrlBuf::from(path.into_os().unwrap()),
+		Url::Search { auth, .. } => UrlBuf::Search {
+			loc:  LocBuf::<std::path::PathBuf>::with(path.into_os().unwrap(), uri, urn).unwrap(),
+			auth: auth.clone(),
+		},
+		Url::Mount { auth, .. } => UrlBuf::Mount {
+			loc:  LocBuf::<std::path::PathBuf>::with(path.into_os().unwrap(), uri, urn).unwrap(),
+			auth: auth.clone(),
+		},
+		Url::Hub { auth, .. } => UrlBuf::Hub {
+			auth: auth.clone().with_parent_depth(path.components().auth_depth()),
+			loc:  LocBuf::<std::path::PathBuf>::with(path.into_os().unwrap(), uri, urn).unwrap(),
+		},
+		Url::Scope { auth, .. } => UrlBuf::Scope {
+			loc:  LocBuf::<typed_path::UnixPathBuf>::with(path.into_unix().unwrap(), uri, urn).unwrap(),
+			auth: auth.clone(),
+		},
+		Url::Sftp { auth, .. } => UrlBuf::Sftp {
+			loc:  LocBuf::<typed_path::UnixPathBuf>::with(path.into_unix().unwrap(), uri, urn).unwrap(),
+			auth: auth.clone(),
+		},
+	}
+	.into()
 }
 
-fn expand_variables(p: &Path) -> Cow<'_, Path> {
+fn expand_variables(p: PathCow) -> PathCow {
 	// ${HOME} or $HOME
 	#[cfg(unix)]
 	let re = regex::bytes::Regex::new(r"\$(?:\{([^}]+)\}|([a-zA-Z\d_]+))").unwrap();
@@ -45,7 +74,7 @@ fn expand_variables(p: &Path) -> Cow<'_, Path> {
 	#[cfg(windows)]
 	let re = regex::bytes::Regex::new(r"%([^%]+)%").unwrap();
 
-	let b = p.as_os_str().as_encoded_bytes();
+	let b = p.encoded_bytes();
 	let b = re.replace_all(b, |caps: &regex::bytes::Captures| {
 		let name = caps.get(2).or_else(|| caps.get(1)).unwrap();
 		str::from_utf8(name.as_bytes())
@@ -54,46 +83,12 @@ fn expand_variables(p: &Path) -> Cow<'_, Path> {
 			.map_or_else(|| caps.get(0).unwrap().as_bytes().to_owned(), |s| s.into_encoded_bytes())
 	});
 
-	unsafe {
-		match b {
-			Cow::Borrowed(b) => Path::new(OsStr::from_encoded_bytes_unchecked(b)).into(),
-			Cow::Owned(b) => PathBuf::from(OsString::from_encoded_bytes_unchecked(b)).into(),
+	match (b, p.kind()) {
+		(Cow::Borrowed(_), _) => p,
+		(Cow::Owned(b), PathKind::Os) => {
+			PathBufDyn::Os(std::path::PathBuf::from_wtf8_vec(b).expect("valid WTF-8 path")).into()
 		}
-	}
-}
-
-fn absolute_url<'a>(url: Url<'a>) -> UrlCow<'a> {
-	let b = url.loc.as_os_str().as_encoded_bytes();
-	let local = !url.scheme.is_virtual();
-
-	if cfg!(windows) && local && b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
-		let loc = LocBuf::with(
-			format!(r"{}:\", b[0].to_ascii_uppercase() as char).into(),
-			if url.has_base() { 0 } else { 2 },
-			if url.has_trail() { 0 } else { 2 },
-		)
-		.expect("Failed to create Loc from drive letter");
-		UrlBuf { loc, scheme: url.scheme.into() }.into()
-	} else if local
-		&& let Ok(rest) = url.loc.strip_prefix("~/")
-		&& let Some(home) = dirs::home_dir()
-		&& home.is_absolute()
-	{
-		let add = home.components().count() - 1; // Home root ("~") has offset by the absolute root ("/")
-		let loc = LocBuf::with(
-			home.join(rest),
-			url.uri().count() + if url.has_base() { 0 } else { add },
-			url.urn().count() + if url.has_trail() { 0 } else { add },
-		)
-		.expect("Failed to create Loc from home directory");
-		UrlBuf { loc, scheme: url.scheme.into() }.into()
-	} else if !url.is_absolute() {
-		let cwd = CWD.load();
-		let loc = LocBuf::with(cwd.loc.join(url.loc), url.uri().count(), url.urn().count())
-			.expect("Failed to create Loc from relative path");
-		UrlBuf { loc, scheme: cwd.scheme.clone() }.into()
-	} else {
-		url.into()
+		(Cow::Owned(b), PathKind::Unix) => PathBufDyn::Unix(b.into()).into(),
 	}
 }
 
@@ -112,48 +107,108 @@ mod tests {
 			std::env::set_var("BAR_BAZ", "bar/baz");
 			std::env::set_var("BAR/BAZ", "bar_baz");
 			std::env::set_var("EM/PT/Y", "");
+
+			std::env::set_var("ABS", "/tmp/downloads");
+			std::env::set_var("DOT", ".");
+			std::env::set_var("DOT_FOO", "./foo");
 		}
 
 		let cases = [
+			// Absolute path expanded
+			("$ABS", "/tmp/downloads"),
+			("test-mount://7z:1//$ABS", "test-mount://7z:3//tmp/downloads"),
+			("test-mount://7z:1:1//$ABS", "test-mount://7z:3:2//tmp/downloads"),
+			("test-scope://aws//$ABS", "test-scope://aws:3:2//tmp/downloads"),
+			// Current directory expanded
+			("test-mount://7z:1/$DOT", "test-mount://7z:1/."),
+			("test-mount://7z:1//$DOT", "test-mount://7z//"),
+			("test-mount://7z:1:1/$DOT", "test-mount://7z:1:1/."),
+			("test-mount://7z:1:1//$DOT", "test-mount://7z//"),
+			("test-mount://7z:2:1//base/$DOT/file", "test-mount://7z:1:1//base/./file"),
+			("test-mount://7z:1:1/$DOT_FOO", "test-mount://7z:2:2/./foo"),
+			("test-mount://7z:1:1//$DOT_FOO", "test-mount://7z:1:1//./foo"),
+			("test-scope://aws/$DOT", "test-scope://aws:1:1/."),
+			("test-scope://aws//$DOT", "test-scope://aws//."),
 			// Zero extra component expanded
-			("archive:////tmp/test.zip/$FOO/bar", "archive:////tmp/test.zip/foo/bar"),
-			("archive://:1//tmp/test.zip/$FOO/bar", "archive://:1//tmp/test.zip/foo/bar"),
-			("archive://:2//tmp/test.zip/bar/$FOO", "archive://:2//tmp/test.zip/bar/foo"),
-			("archive://:3//tmp/test.zip/$FOO/bar", "archive://:3//tmp/test.zip/foo/bar"),
-			("archive://:3:1//tmp/test.zip/bar/$FOO", "archive://:3:1//tmp/test.zip/bar/foo"),
-			("archive://:3:2//tmp/test.zip/$FOO/bar", "archive://:3:2//tmp/test.zip/foo/bar"),
-			("archive://:3:3//tmp/test.zip/bar/$FOO", "archive://:3:3//tmp/test.zip/bar/foo"),
+			("test-mount://7z//tmp/test.zip/$FOO/bar", "test-mount://7z//tmp/test.zip/foo/bar"),
+			("test-mount://7z:1//tmp/test.zip/$FOO/bar", "test-mount://7z:1//tmp/test.zip/foo/bar"),
+			("test-mount://7z:2//tmp/test.zip/bar/$FOO", "test-mount://7z:2//tmp/test.zip/bar/foo"),
+			("test-mount://7z:3//tmp/test.zip/$FOO/bar", "test-mount://7z:3//tmp/test.zip/foo/bar"),
+			("test-mount://7z:3:1//tmp/test.zip/bar/$FOO", "test-mount://7z:3:1//tmp/test.zip/bar/foo"),
+			("test-mount://7z:3:2//tmp/test.zip/$FOO/bar", "test-mount://7z:3:2//tmp/test.zip/foo/bar"),
+			("test-mount://7z:3:3//tmp/test.zip/bar/$FOO", "test-mount://7z:3:3//tmp/test.zip/bar/foo"),
 			// +1 component
-			("archive:////tmp/test.zip/$BAR_BAZ", "archive:////tmp/test.zip/bar/baz"),
-			("archive://:1//tmp/test.zip/$BAR_BAZ", "archive://:2//tmp/test.zip/bar/baz"),
-			("archive://:2//$BAR_BAZ/tmp/test.zip", "archive://:2//bar/baz/tmp/test.zip"),
-			("archive://:2:1//tmp/test.zip/$BAR_BAZ", "archive://:3:2//tmp/test.zip/bar/baz"),
-			("archive://:2:2//tmp/$BAR_BAZ/test.zip", "archive://:3:3//tmp/bar/baz/test.zip"),
-			("archive://:2:2//$BAR_BAZ/tmp/test.zip", "archive://:2:2//bar/baz/tmp/test.zip"),
+			("test-mount://7z//tmp/test.zip/$BAR_BAZ", "test-mount://7z//tmp/test.zip/bar/baz"),
+			("test-mount://7z:1//tmp/test.zip/$BAR_BAZ", "test-mount://7z:2//tmp/test.zip/bar/baz"),
+			("test-mount://7z:2//$BAR_BAZ/tmp/test.zip", "test-mount://7z:2//bar/baz/tmp/test.zip"),
+			("test-mount://7z:2:1//tmp/test.zip/$BAR_BAZ", "test-mount://7z:3:2//tmp/test.zip/bar/baz"),
+			("test-mount://7z:2:2//tmp/$BAR_BAZ/test.zip", "test-mount://7z:3:3//tmp/bar/baz/test.zip"),
+			("test-mount://7z:2:2//$BAR_BAZ/tmp/test.zip", "test-mount://7z:2:2//bar/baz/tmp/test.zip"),
+			("test-hub://a1/@root/$BAR_BAZ", "test-hub://a1:2:2/@,root/bar/baz"),
 			// -1 component
-			("archive:////tmp/test.zip/${BAR/BAZ}", "archive:////tmp/test.zip/bar_baz"),
-			("archive://:1//tmp/test.zip/${BAR/BAZ}", "archive://:1//tmp/test.zip/${BAR/BAZ}"),
-			("archive://:1//tmp/${BAR/BAZ}/test.zip", "archive://:1//tmp/bar_baz/test.zip"),
-			("archive://:2//tmp/test.zip/${BAR/BAZ}", "archive://:1//tmp/test.zip/bar_baz"),
-			("archive://:2//tmp/${BAR/BAZ}/test.zip", "archive://:2//tmp/${BAR/BAZ}/test.zip"),
-			("archive://:2:1//tmp/test.zip/${BAR/BAZ}", "archive://:2:1//tmp/test.zip/${BAR/BAZ}"),
-			("archive://:2:1//tmp/${BAR/BAZ}/test.zip", "archive://:2:1//tmp/${BAR/BAZ}/test.zip"),
-			("archive://:2:1//${BAR/BAZ}/tmp/test.zip", "archive://:2:1//bar_baz/tmp/test.zip"),
-			("archive://:3:2//tmp/test.zip/${BAR/BAZ}", "archive://:2:1//tmp/test.zip/bar_baz"),
-			("archive://:3:2//tmp/${BAR/BAZ}/test.zip", "archive://:3:2//tmp/${BAR/BAZ}/test.zip"),
-			("archive://:3:3//tmp/test.zip/${BAR/BAZ}", "archive://:2:2//tmp/test.zip/bar_baz"),
-			("archive://:3:3//tmp/${BAR/BAZ}/test.zip", "archive://:2:2//tmp/bar_baz/test.zip"),
+			("test-mount://7z//tmp/test.zip/${BAR/BAZ}", "test-mount://7z//tmp/test.zip/bar_baz"),
+			("test-mount://7z:1//tmp/test.zip/${BAR/BAZ}", "test-mount://7z:1//tmp/test.zip/${BAR/BAZ}"),
+			("test-mount://7z:1//tmp/${BAR/BAZ}/test.zip", "test-mount://7z:1//tmp/bar_baz/test.zip"),
+			("test-mount://7z:2//tmp/test.zip/${BAR/BAZ}", "test-mount://7z:1//tmp/test.zip/bar_baz"),
+			("test-mount://7z:2//tmp/${BAR/BAZ}/test.zip", "test-mount://7z:2//tmp/${BAR/BAZ}/test.zip"),
+			(
+				"test-mount://7z:2:1//tmp/test.zip/${BAR/BAZ}",
+				"test-mount://7z:2:1//tmp/test.zip/${BAR/BAZ}",
+			),
+			(
+				"test-mount://7z:2:1//tmp/${BAR/BAZ}/test.zip",
+				"test-mount://7z:2:1//tmp/${BAR/BAZ}/test.zip",
+			),
+			("test-mount://7z:2:1//${BAR/BAZ}/tmp/test.zip", "test-mount://7z:2:1//bar_baz/tmp/test.zip"),
+			("test-mount://7z:3:2//tmp/test.zip/${BAR/BAZ}", "test-mount://7z:2:1//tmp/test.zip/bar_baz"),
+			(
+				"test-mount://7z:3:2//tmp/${BAR/BAZ}/test.zip",
+				"test-mount://7z:3:2//tmp/${BAR/BAZ}/test.zip",
+			),
+			("test-mount://7z:3:3//tmp/test.zip/${BAR/BAZ}", "test-mount://7z:2:2//tmp/test.zip/bar_baz"),
+			("test-mount://7z:3:3//tmp/${BAR/BAZ}/test.zip", "test-mount://7z:2:2//tmp/bar_baz/test.zip"),
+			("test-hub://a1:2:2/@b1,root/${BAR/BAZ}", "test-hub://a1/@root/bar_baz"),
 			// Zeros all components
-			("archive:////${EM/PT/Y}", "archive:////"),
-			("archive://:1//${EM/PT/Y}", "archive://:1//${EM/PT/Y}"),
-			("archive://:2//${EM/PT/Y}", "archive://:2//${EM/PT/Y}"),
-			("archive://:3//${EM/PT/Y}", "archive:////"),
-			("archive://:4//${EM/PT/Y}", "archive://:1//"),
+			("test-mount://7z//${EM/PT/Y}", "test-mount://7z//"),
+			("test-mount://7z:1//${EM/PT/Y}", "test-mount://7z:1//${EM/PT/Y}"),
+			("test-mount://7z:2//${EM/PT/Y}", "test-mount://7z:2//${EM/PT/Y}"),
+			("test-mount://7z:3//${EM/PT/Y}", "test-mount://7z//"),
+			("test-mount://7z:4//${EM/PT/Y}", "test-mount://7z:1//"),
 		];
 
 		for (input, expected) in cases {
 			let u: UrlBuf = input.parse()?;
-			assert_eq!(format!("{:?}", expand_url(u)), expected);
+			assert_eq!(format!("{:?}", expand_url(u).as_url()), expected);
+		}
+
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn test_expand_url() -> Result<()> {
+		yazi_shared::init_tests();
+		unsafe {
+			std::env::set_var("ROOTED", r"\downloads");
+			std::env::set_var("DRIVE_ABS", r"C:\downloads");
+			std::env::set_var("DRIVE_REL", r"C:downloads");
+		}
+
+		let cases = [
+			// Rooted path expanded
+			(r"test-mount://7z:2:1/D:\base\%ROOTED%\file", r"test-mount://7z:3:1/D:\downloads\file"),
+			(r"test-mount://7z:2:1/D:\base\file\%ROOTED%", r"test-mount://7z:2:1/D:\downloads"),
+			// Drive-absolute path expanded
+			(r"test-mount://7z:2:1/D:\base\%DRIVE_ABS%\file", r"test-mount://7z:3:1/C:\downloads\file"),
+			(r"test-mount://7z:2:1/D:\base\file\%DRIVE_ABS%", r"test-mount://7z:2:1/C:\downloads"),
+			// Drive-relative path expanded
+			(r"test-mount://7z:2:1/D:\base\%DRIVE_REL%\file", r"test-mount://7z:2:1/C:downloads\file"),
+			(r"test-mount://7z:2:1/D:\base\file\%DRIVE_REL%", r"test-mount://7z:1:1/C:downloads"),
+		];
+
+		for (input, expected) in cases {
+			let u: UrlBuf = input.parse()?;
+			assert_eq!(format!("{:?}", expand_url(u).as_url()), expected);
 		}
 
 		Ok(())

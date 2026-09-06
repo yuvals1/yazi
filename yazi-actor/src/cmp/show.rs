@@ -1,9 +1,10 @@
-use std::{ffi::OsStr, mem, ops::ControlFlow};
+use std::{mem, ops::ControlFlow};
 
 use anyhow::Result;
+use yazi_core::cmp::CmpItem;
 use yazi_macro::{render, succ};
-use yazi_parser::cmp::{CmpItem, ShowOpt};
-use yazi_shared::{event::Data, osstr_contains, osstr_starts_with};
+use yazi_parser::cmp::ShowForm;
+use yazi_shared::{data::Data, path::{DynPath, PathDyn}, strand::StrandLike};
 
 use crate::{Actor, Ctx};
 
@@ -12,11 +13,11 @@ const LIMIT: usize = 30;
 pub struct Show;
 
 impl Actor for Show {
-	type Options = ShowOpt;
+	type Form = ShowForm;
 
 	const NAME: &str = "show";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, Self::Form { opt }: Self::Form) -> Result<Data> {
 		let cmp = &mut cx.cmp;
 		if cmp.ticket != opt.ticket {
 			succ!();
@@ -29,9 +30,8 @@ impl Actor for Show {
 			succ!();
 		};
 
-		cmp.ticket = opt.ticket;
-		cmp.cands = Self::match_candidates(opt.word.as_os_str(), cache);
-		if cmp.cands.is_empty() {
+		cmp.matches = Self::match_candidates(opt.word.dyn_path(), cache);
+		if cmp.matches.is_empty() {
 			succ!(render!(mem::replace(&mut cmp.visible, false)));
 		}
 
@@ -43,16 +43,22 @@ impl Actor for Show {
 }
 
 impl Show {
-	fn match_candidates(word: &OsStr, cache: &[CmpItem]) -> Vec<CmpItem> {
-		let smart = !word.as_encoded_bytes().iter().any(|c| c.is_ascii_uppercase());
+	fn match_candidates(word: PathDyn, cache: &[CmpItem]) -> Vec<CmpItem> {
+		let smart = !word.encoded_bytes().iter().any(|&b| b.is_ascii_uppercase());
 
 		let flow = cache.iter().try_fold((Vec::new(), Vec::new()), |(mut exact, mut fuzzy), item| {
-			if osstr_starts_with(&item.name, word, smart) {
+			let starts_with = if smart {
+				item.name.starts_with_ignore_ascii_case(word)
+			} else {
+				item.name.starts_with(word)
+			};
+
+			if starts_with {
 				exact.push(item);
 				if exact.len() >= LIMIT {
 					return ControlFlow::Break((exact, fuzzy));
 				}
-			} else if fuzzy.len() < LIMIT - exact.len() && osstr_contains(&item.name, word) {
+			} else if fuzzy.len() < LIMIT - exact.len() && item.name.contains(word) {
 				// Here we don't break the control flow, since we want more exact matching.
 				fuzzy.push(item)
 			}

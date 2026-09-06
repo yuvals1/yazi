@@ -1,12 +1,14 @@
 use anyhow::Result;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
+use indexmap::IndexSet;
 use mlua::Function;
 use parking_lot::RwLock;
-use yazi_boot::BOOT;
-use yazi_fs::FolderStage;
-use yazi_shared::{Id, RoCell, url::{UrlBuf, UrlBufCov}};
+use yazi_boot::{BOOT, ID};
+use yazi_fs::{FolderStage, file::FileCov};
+use yazi_shared::{id::Id, url::{Url, UrlBuf}};
+use yazi_shim::cell::RoCell;
 
-use crate::{Client, ID, PEERS, ember::{BodyMoveItem, Ember, EmberBulk, EmberHi}};
+use crate::{Client, PEERS, ember::{Ember, EmberBulkRename, EmberDuplicateItem, EmberHi, EmberMoveItem}};
 
 pub static LOCAL: RoCell<RwLock<HashMap<String, HashMap<String, Function>>>> = RoCell::new();
 
@@ -96,7 +98,12 @@ impl Pubsub {
 		unsub!(REMOTE)(plugin, kind) && Self::pub_inner_hi()
 	}
 
-	pub fn r#pub(body: Ember<'static>) -> Result<()> { body.with_receiver(*ID).emit() }
+	pub fn r#pub(body: Ember<'static>) -> Result<()> {
+		let payload = body.with_receiver(*ID);
+		payload.try_flush()?;
+		payload.emit();
+		Ok(())
+	}
 
 	pub fn pub_to(receiver: Id, body: Ember<'static>) -> Result<()> {
 		if receiver == *ID {
@@ -112,7 +119,7 @@ impl Pubsub {
 		Ok(())
 	}
 
-	pub fn pub_inner_hi() -> bool {
+	pub(crate) fn pub_inner_hi() -> bool {
 		let abilities = REMOTE.read().keys().cloned().collect();
 		let abilities = BOOT.remote_events.union(&abilities).map(AsRef::as_ref);
 
@@ -121,18 +128,18 @@ impl Pubsub {
 		true
 	}
 
-	pub fn pub_after_bulk<'a, I>(changes: I) -> Result<()>
+	pub fn pub_after_bulk_rename<'a, I>(changes: I) -> Result<()>
 	where
-		I: Iterator<Item = (&'a UrlBuf, &'a UrlBuf)> + Clone,
+		I: Iterator<Item = (Url<'a>, Url<'a>)> + Clone,
 	{
-		if BOOT.local_events.contains("bulk") {
-			EmberBulk::borrowed(changes.clone()).with_receiver(*ID).flush()?;
+		if BOOT.local_events.contains("bulk-rename") {
+			EmberBulkRename::borrowed(changes.clone()).with_receiver(*ID).flush()?;
 		}
-		if PEERS.read().values().any(|p| p.able("bulk")) {
-			Client::push(EmberBulk::borrowed(changes.clone()))?;
+		if PEERS.read().values().any(|p| p.able("bulk-rename")) {
+			Client::push(EmberBulkRename::borrowed(changes.clone()))?;
 		}
-		if LOCAL.read().contains_key("bulk") {
-			Self::r#pub(EmberBulk::owned(changes))?;
+		if LOCAL.read().contains_key("bulk-rename") {
+			Self::r#pub(EmberBulkRename::owned(changes))?;
 		}
 		Ok(())
 	}
@@ -144,24 +151,33 @@ impl Pubsub {
 	}
 }
 
+#[rustfmt::skip]
 impl Pubsub {
 	pub_after!(tab(idx: Id), (idx));
 
 	pub_after!(cd(tab: Id, url: &UrlBuf), (tab, url));
 
-	pub_after!(load(tab: Id, url: &UrlBuf, stage: FolderStage), (tab, url, stage));
+	pub_after!(load(tab: Id, url: &UrlBuf, stage: &FolderStage), (tab, url, stage));
 
 	pub_after!(hover(tab: Id, url: Option<&UrlBuf>), (tab, url));
 
 	pub_after!(rename(tab: Id, from: &UrlBuf, to: &UrlBuf), (tab, from, to));
 
-	pub_after!(@yank(cut: bool, urls: &HashSet<UrlBufCov>), (cut, urls));
+	pub_after!(@yank(cut: bool, files: &IndexSet<FileCov>), (cut, files));
 
-	pub_after!(move(items: Vec<BodyMoveItem>), (&items), (items));
+	pub_after!(duplicate(items: Vec<EmberDuplicateItem>), (&items), (items));
+
+	pub_after!(move(items: Vec<EmberMoveItem>), (&items), (items));
 
 	pub_after!(trash(urls: Vec<UrlBuf>), (&urls), (urls));
 
 	pub_after!(delete(urls: Vec<UrlBuf>), (&urls), (urls));
 
+	pub_after!(download(urls: Vec<UrlBuf>), (&urls), (urls));
+
+	pub_after!(input(r#type: &'static str, value: &str), (r#type, value));
+
 	pub_after!(mount(), ());
+
+	pub_after!(theme(), ());
 }

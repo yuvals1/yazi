@@ -1,38 +1,48 @@
-use std::{io::Write, path::Path};
+use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, bail};
-use crossterm::{cursor::MoveTo, queue};
 use image::{DynamicImage, GenericImageView, RgbImage};
 use palette::{Srgb, cast::ComponentsAs};
-use quantette::{ColorSlice, PaletteSize, QuantizeOutput, wu::UIntBinner};
-use ratatui::layout::Rect;
+use quantette::{PaletteSize, color_map::IndexedColorMap, wu::{BinnerU8x3, WuU8x3}};
+use ratatui_core::layout::Rect;
+use yazi_config::THEME;
+use yazi_emulator::{CLOSE, ESCAPE, Emulator, START};
+use yazi_tty::sequence::{MoveTo, ResetAttrs, SetBg};
 
-use crate::{CLOSE, ESCAPE, Emulator, Image, START, adapter::Adapter};
+use crate::{ADAPTOR, Image};
 
-pub(crate) struct Sixel;
+pub(super) struct Sixel;
+
+struct QuantizeOutput<T> {
+	indices: Vec<u8>,
+	palette: Vec<T>,
+}
 
 impl Sixel {
-	pub(crate) async fn image_show(path: &Path, max: Rect) -> Result<Rect> {
+	pub(super) async fn image_show(path: PathBuf, max: Rect) -> Result<Rect> {
 		let img = Image::downscale(path, max).await?;
 		let area = Image::pixel_area((img.width(), img.height()), max);
 		let b = Self::encode(img).await?;
 
-		Adapter::Sixel.image_hide()?;
-		Adapter::shown_store(area);
+		ADAPTOR.image_hide()?;
+		ADAPTOR.shown_store(area);
 		Emulator::move_lock((area.x, area.y), |w| {
 			w.write_all(&b)?;
 			Ok(area)
 		})
 	}
 
-	pub(crate) fn image_erase(area: Rect) -> Result<()> {
+	pub(super) fn image_erase(area: Rect) -> Result<()> {
 		let s = " ".repeat(area.width as usize);
 		Emulator::move_lock((0, 0), |w| {
+			if let Some(c) = THEME.app.overall.get().bg {
+				write!(w, "{}", SetBg(c))?;
+			}
 			for y in area.top()..area.bottom() {
-				queue!(w, MoveTo(area.x, y))?;
+				write!(w, "{}", MoveTo(area.x, y))?;
 				write!(w, "{s}")?;
 			}
-			Ok(())
+			Ok(write!(w, "{ResetAttrs}")?)
 		})
 	}
 
@@ -50,7 +60,7 @@ impl Sixel {
 
 		tokio::task::spawn_blocking(move || {
 			let mut buf = vec![];
-			write!(buf, "{START}P0;1;8q\"1;1;{};{}", img.width(), img.height())?;
+			write!(buf, "{START}P9;1q\"1;1;{};{}", img.width(), img.height())?;
 
 			// Palette
 			for (i, c) in qo.palette.iter().enumerate() {
@@ -110,12 +120,14 @@ impl Sixel {
 
 	fn quantify(rgb: &RgbImage, alpha: bool) -> Result<QuantizeOutput<Srgb<u8>>> {
 		let buf = &rgb.as_raw()[..(rgb.pixels().len() * 3)];
-		let slice: ColorSlice<Srgb<u8>> = buf.components_as().try_into()?;
+		let colors: &[Srgb<u8>] = buf.components_as();
 
-		Ok(quantette::wu::indexed_palette(
-			&slice,
-			PaletteSize::try_from(256u16 - alpha as u16)?,
-			&UIntBinner::<32>,
-		))
+		let wu = WuU8x3::run_slice(colors, BinnerU8x3::rgb())?;
+		let color_map = wu.color_map(PaletteSize::try_from(256u16 - alpha as u16)?);
+
+		Ok(QuantizeOutput {
+			indices: color_map.map_to_indices(colors),
+			palette: color_map.into_palette().into_vec(),
+		})
 	}
 }

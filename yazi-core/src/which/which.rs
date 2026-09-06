@@ -1,57 +1,54 @@
-use yazi_config::{KEYMAP, keymap::{ChordCow, Key}};
-use yazi_macro::{emit, render, render_and};
+use tokio::sync::mpsc;
+use yazi_config::keymap::{ChordArc, Key};
+use yazi_macro::{emit, render_and};
 use yazi_shared::Layer;
-
-use crate::which::WhichSorter;
 
 #[derive(Default)]
 pub struct Which {
+	pub tx:    Option<mpsc::UnboundedSender<Option<ChordArc>>>,
+	pub layer: Layer,
+	pub cands: Vec<ChordArc>,
 	pub times: usize,
-	pub cands: Vec<ChordCow>,
 
-	// Visibility
-	pub visible: bool,
-	pub silent:  bool,
+	// Active state
+	pub active: bool,
+	pub silent: bool,
 }
 
 impl Which {
 	pub fn r#type(&mut self, key: Key) -> bool {
+		if key.code.is_modifier() || key.code.is_lock() {
+			return false;
+		}
+
 		self.cands.retain(|c| c.on.len() > self.times && c.on[self.times] == key);
 		self.times += 1;
 
 		if self.cands.is_empty() {
-			self.reset();
+			self.dismiss(None);
 		} else if self.cands.len() == 1 {
-			emit!(Seq(self.cands.remove(0).into_seq()));
-			self.reset();
+			let chord = self.cands.remove(0);
+			self.dismiss(Some(chord));
 		} else if let Some(i) = self.cands.iter().position(|c| c.on.len() == self.times) {
-			emit!(Seq(self.cands.remove(i).into_seq()));
-			self.reset();
+			let chord = self.cands.remove(i);
+			self.dismiss(Some(chord));
 		}
 
 		render_and!(true)
 	}
 
-	fn reset(&mut self) {
-		self.times = 0;
+	pub fn dismiss(&mut self, chord: Option<ChordArc>) {
 		self.cands.clear();
+		self.times = 0;
 
-		self.visible = false;
+		self.active = false;
 		self.silent = false;
-	}
 
-	pub fn show_with(&mut self, key: Key, layer: Layer) {
-		self.times = 1;
-		self.cands = KEYMAP
-			.get(layer)
-			.iter()
-			.filter(|c| c.on.len() > 1 && c.on[0] == key)
-			.map(|c| c.into())
-			.collect();
-
-		WhichSorter::default().sort(&mut self.cands);
-		self.visible = true;
-		self.silent = false;
-		render!();
+		if let Some(tx) = self.tx.take() {
+			_ = tx.send(chord.as_ref().map(Into::into));
+		}
+		if let Some(chord) = chord {
+			emit!(Seq(chord.into_seq(self.layer)));
+		}
 	}
 }

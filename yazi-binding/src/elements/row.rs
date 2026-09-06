@@ -1,4 +1,5 @@
-use mlua::{AnyUserData, ExternalError, IntoLua, Lua, MetaMethod, Table, UserData, Value};
+use mlua::{AnyUserData, ExternalError, FromLua, IntoLua, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
+use ratatui_core::{buffer::Buffer, layout::Rect};
 
 use super::Cell;
 
@@ -10,7 +11,7 @@ pub struct Row {
 	height:           u16,
 	top_margin:       u16,
 	bottom_margin:    u16,
-	style:            ratatui::style::Style,
+	style:            ratatui_core::style::Style,
 }
 
 impl Row {
@@ -24,9 +25,35 @@ impl Row {
 
 		row.into_lua(lua)
 	}
+
+	pub(super) fn height_with_margin(&self) -> u16 {
+		self.height.saturating_add(self.top_margin).saturating_add(self.bottom_margin)
+	}
+
+	pub(super) fn measure(&mut self, columns: &[Rect]) {
+		let height = self
+			.cells
+			.iter()
+			.zip(columns)
+			.map(|(cell, column)| cell.height(column.width))
+			.max()
+			.unwrap_or_default();
+		self.height = self.height.max(height).max(1);
+	}
+
+	pub(super) fn render_overlays(&self, mut area: Rect, buf: &mut Buffer, columns: &[Rect]) {
+		area.y = area.y.saturating_add(self.top_margin);
+		area.height = area.height.saturating_sub(self.top_margin).min(self.height);
+		for (cell, column) in self.cells.iter().zip(columns) {
+			cell.render_overlay(
+				Rect::new(area.x.saturating_add(column.x), area.y, column.width, area.height),
+				buf,
+			);
+		}
+	}
 }
 
-impl From<Row> for ratatui::widgets::Row<'static> {
+impl From<Row> for ratatui_widgets::table::Row<'static> {
 	fn from(value: Row) -> Self {
 		Self::new(value.cells)
 			.height(value.height.max(1))
@@ -36,36 +63,36 @@ impl From<Row> for ratatui::widgets::Row<'static> {
 	}
 }
 
-impl TryFrom<Value> for Row {
+impl TryFrom<&AnyUserData> for Row {
 	type Error = mlua::Error;
 
-	fn try_from(value: Value) -> Result<Self, Self::Error> {
-		Ok(match value {
-			Value::UserData(ud) => {
-				if let Ok(row) = ud.take() {
-					row
-				} else {
-					Err(EXPECTED.into_lua_err())?
-				}
-			}
-			_ => Err(EXPECTED.into_lua_err())?,
-		})
+	fn try_from(value: &AnyUserData) -> Result<Self, Self::Error> {
+		if let Ok(row) = value.take() { Ok(row) } else { Err(EXPECTED.into_lua_err()) }
+	}
+}
+
+impl FromLua for Row {
+	fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+		match value {
+			Value::UserData(ud) => Self::try_from(&ud),
+			_ => Err(EXPECTED.into_lua_err()),
+		}
 	}
 }
 
 impl UserData for Row {
-	fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
 		crate::impl_style_method!(methods, style);
 
-		methods.add_function_mut("height", |_, (ud, value): (AnyUserData, u16)| {
+		methods.add_function("height", |_, (ud, value): (AnyUserData, u16)| {
 			ud.borrow_mut::<Self>()?.height = value;
 			Ok(ud)
 		});
-		methods.add_function_mut("margin_t", |_, (ud, value): (AnyUserData, u16)| {
+		methods.add_function("margin_t", |_, (ud, value): (AnyUserData, u16)| {
 			ud.borrow_mut::<Self>()?.top_margin = value;
 			Ok(ud)
 		});
-		methods.add_function_mut("margin_b", |_, (ud, value): (AnyUserData, u16)| {
+		methods.add_function("margin_b", |_, (ud, value): (AnyUserData, u16)| {
 			ud.borrow_mut::<Self>()?.bottom_margin = value;
 			Ok(ud)
 		});

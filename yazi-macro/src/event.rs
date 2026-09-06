@@ -1,26 +1,23 @@
 #[macro_export]
 macro_rules! emit {
-	(Quit($opt:expr)) => {
-		yazi_shared::event::Event::Quit($opt).emit();
+	(Call($action:expr)) => {
+		yazi_shared::event::Event::Call(yazi_shared::event::ActionCow::from($action)).emit()
 	};
-	(Call($cmd:expr)) => {
-		yazi_shared::event::Event::Call(yazi_shared::event::CmdCow::from($cmd)).emit();
-	};
-	(Seq($cmds:expr)) => {
-		yazi_shared::event::Event::Seq($cmds).emit();
+	(Seq($actions:expr)) => {
+		yazi_shared::event::Event::Seq($actions).emit()
 	};
 	($event:ident) => {
-		yazi_shared::event::Event::$event.emit();
+		yazi_shared::event::Event::$event.emit()
 	};
 }
 
 #[macro_export]
 macro_rules! relay {
 	($layer:ident : $name:ident) => {
-		yazi_shared::event::Cmd::new_relay(concat!(stringify!($layer), ":", stringify!($name)))
+		yazi_shared::event::Action::new_relay(concat!(stringify!($layer), ":", stringify!($name)))
 	};
 	($layer:ident : $name:ident, $args:expr) => {
-		yazi_shared::event::Cmd::new_relay_args(
+		yazi_shared::event::Action::new_relay_args(
 			concat!(stringify!($layer), ":", stringify!($name)),
 			$args,
 		)
@@ -30,9 +27,9 @@ macro_rules! relay {
 #[macro_export]
 macro_rules! succ {
 	($data:expr) => {
-		return Ok(yazi_shared::event::Data::from($data))
+		return Ok(yazi_shared::data::Data::from($data))
 	};
 	() => {
-		return Ok(yazi_shared::event::Data::Nil)
+		return Ok(yazi_shared::data::Data::Nil)
 	};
 }

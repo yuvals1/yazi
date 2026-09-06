@@ -1,14 +1,20 @@
 use tokio::sync::mpsc;
-use yazi_config::popup::InputCfg;
-use yazi_macro::{emit, relay};
-use yazi_shared::errors::InputError;
+use yazi_dds::Pubsub;
+use yazi_macro::{emit, log_if_err, relay};
+use yazi_shim::strum::IntoStr;
+use yazi_widgets::input::{InputEvent, InputOpt};
 
 pub struct InputProxy;
 
 impl InputProxy {
-	pub fn show(cfg: InputCfg) -> mpsc::UnboundedReceiver<Result<String, InputError>> {
+	pub fn show(mut opt: InputOpt) -> mpsc::UnboundedReceiver<InputEvent> {
 		let (tx, rx) = mpsc::unbounded_channel();
-		emit!(Call(relay!(input:show).with_any("tx", tx).with_any("cfg", cfg)));
+		opt = opt.with_cb(move |event| {
+			log_if_err!(Pubsub::pub_after_input((&event).into_str(), event.value()));
+			tx.send(event).ok();
+		});
+
+		emit!(Call(relay!(input:show).with_any("opt", opt)));
 		rx
 	}
 }

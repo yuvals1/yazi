@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
+use yazi_binding::elements::Spatial;
 use yazi_core::Core;
 
 pub(crate) struct Spot<'a> {
@@ -17,8 +18,8 @@ impl Widget for Spot<'_> {
 
 		for w in &lock.data {
 			let rect = w.area().transform(|p| self.core.mgr.area(p));
-			if win.intersects(rect) {
-				w.clone().render(rect, buf);
+			if rect.intersection(win) == rect {
+				w.render(rect, buf);
 			}
 		}
 	}

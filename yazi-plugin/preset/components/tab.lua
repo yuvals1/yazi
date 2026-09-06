@@ -11,22 +11,26 @@ end
 
 function Tab:layout()
 	local ratio = rt.mgr.ratio
+	local all = ratio[1] + ratio[2] + ratio[3]
 	self._chunks = ui.Layout()
 		:direction(ui.Layout.HORIZONTAL)
 		:constraints({
-			ui.Constraint.Ratio(ratio.parent, ratio.all),
-			ui.Constraint.Ratio(ratio.current, ratio.all),
-			ui.Constraint.Ratio(ratio.preview, ratio.all),
+			ui.Constraint.Ratio(ratio[1], all),
+			ui.Constraint.Ratio(ratio[2], all),
+			ui.Constraint.Ratio(ratio[3], all),
 		})
 		:split(self._area)
 end
 
 function Tab:build()
+	local c = self._chunks
+	local p = c[2].w > 0 and 0 or 1
 	self._children = {
-		Parent:new(self._chunks[1]:pad(ui.Pad.x(1)), self._tab),
-		Current:new(self._chunks[2], self._tab),
-		Preview:new(self._chunks[3]:pad(ui.Pad.x(1)), self._tab),
-		Rail:new(self._chunks, self._tab),
+		Parent:new(c[1]:pad(ui.Pad(0, p, 0, 1)), self._tab),
+		Current:new(c[2]:pad(ui.Pad.x(1)), self._tab),
+		Preview:new(c[3]:pad(ui.Pad(0, 1, 0, p)), self._tab),
+		Rails:new(c, self._tab),
+		Markers:new(c, self._tab),
 	}
 end
 

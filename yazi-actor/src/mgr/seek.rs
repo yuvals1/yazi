@@ -1,33 +1,38 @@
 use anyhow::Result;
+use mlua::ObjectLike;
 use yazi_config::YAZI;
-use yazi_macro::succ;
-use yazi_parser::mgr::SeekOpt;
-use yazi_plugin::isolate;
-use yazi_shared::event::Data;
+use yazi_core::app::PluginOpt;
+use yazi_macro::{act, succ};
+use yazi_parser::mgr::SeekForm;
+use yazi_runner::previewer::SeekJob;
+use yazi_shared::{data::Data, pool::InternStr};
 
 use crate::{Actor, Ctx};
 
 pub struct Seek;
 
 impl Actor for Seek {
-	type Options = SeekOpt;
+	type Form = SeekForm;
 
 	const NAME: &str = "seek";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
 		let Some(hovered) = cx.hovered() else {
 			succ!(cx.tab_mut().preview.reset());
 		};
 
-		let Some(mime) = cx.mgr.mimetype.by_file(hovered) else {
+		let Some(mime) = cx.mgr.mimetype.get(&hovered.url) else {
 			succ!(cx.tab_mut().preview.reset());
 		};
 
-		let Some(previewer) = YAZI.plugin.previewer(&hovered.url, mime) else {
+		let Some(previewer) = YAZI.plugin.previewers.matches(hovered, mime) else {
 			succ!(cx.tab_mut().preview.reset());
 		};
 
-		isolate::seek_sync(&previewer.run, hovered.clone(), opt.units);
-		succ!();
+		let job = SeekJob { file: hovered.clone(), mime: mime.intern(), units: form.units };
+		let opt = PluginOpt::new_callback(previewer.name.clone(), move |_, plugin| {
+			plugin.call_method("seek", job)
+		});
+		act!(app:plugin, cx, opt)
 	}
 }

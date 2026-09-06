@@ -1,17 +1,26 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::{CmdCow, Data};
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
 pub struct SpotOpt {
-	pub skip: Option<usize>,
+	pub skip:  Option<usize>,
+	#[serde(default)]
+	pub force: bool,
 }
 
-impl From<CmdCow> for SpotOpt {
-	fn from(c: CmdCow) -> Self { Self { skip: c.get("skip").and_then(Data::as_usize) } }
+impl TryFrom<ActionCow> for SpotOpt {
+	type Error = anyhow::Error;
+
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
 impl From<usize> for SpotOpt {
-	fn from(skip: usize) -> Self { Self { skip: Some(skip) } }
+	fn from(skip: usize) -> Self { Self { skip: Some(skip), ..Default::default() } }
+}
+
+impl From<bool> for SpotOpt {
+	fn from(force: bool) -> Self { Self { force, ..Default::default() } }
 }
 
 impl FromLua for SpotOpt {

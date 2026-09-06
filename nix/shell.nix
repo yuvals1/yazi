@@ -1,14 +1,14 @@
 {
-  callPackage,
-  rust-bin,
-  nodePackages,
+  mkShell,
+  yazi,
+  toolchain,
+  cspell,
+  yazi-unwrapped,
 }:
-let
-  mainPkg = callPackage ./yazi.nix { };
-in
-mainPkg.overrideAttrs (oa: {
-  nativeBuildInputs = [
-    (rust-bin.stable.latest.default.override {
+
+mkShell {
+  packages = yazi.passthru.runtimePaths ++ [
+    (toolchain.override {
       extensions = [
         "rust-src"
         "rustfmt"
@@ -16,9 +16,10 @@ mainPkg.overrideAttrs (oa: {
         "clippy"
       ];
     })
+    cspell
+  ];
 
-    nodePackages.cspell
-  ] ++ (oa.nativeBuildInputs or [ ]);
+  inputsFrom = [ yazi-unwrapped ];
 
   env.RUST_BACKTRACE = "1";
-})
+}

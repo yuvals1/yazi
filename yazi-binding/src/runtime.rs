@@ -1,56 +1,79 @@
-use std::collections::VecDeque;
-
+use anyhow::{Context, Result};
+use compact_str::CompactString;
 use hashbrown::HashMap;
 use mlua::Function;
 
+use crate::Scope;
+
 #[derive(Debug, Default)]
 pub struct Runtime {
-	frames: VecDeque<RuntimeFrame>,
-	blocks: HashMap<String, Vec<Function>>,
+	frames: Vec<RuntimeFrame>,
+	blocks: HashMap<CompactString, Vec<Function>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 struct RuntimeFrame {
-	id:    String,
-	calls: usize,
+	name:     CompactString,
+	blocking: bool,
+	scope:    Scope,
 }
 
 impl Runtime {
-	pub fn new(id: &str) -> Self {
+	pub fn new(name: &str, scope: Scope) -> Self {
 		Self {
-			frames: VecDeque::from([RuntimeFrame { id: id.to_owned(), calls: 0 }]),
+			frames: vec![RuntimeFrame { name: name.into(), scope, ..Default::default() }],
 			..Default::default()
 		}
 	}
 
-	pub fn push(&mut self, id: &str) {
-		self.frames.push_back(RuntimeFrame { id: id.to_owned(), calls: 0 });
+	pub fn enter(&mut self, name: &str, blocking: bool, scope: Scope) {
+		self.frames.push(RuntimeFrame { name: name.into(), blocking, scope });
 	}
 
-	pub fn pop(&mut self) { self.frames.pop_back(); }
-
-	pub fn current(&self) -> Option<&str> { self.frames.back().map(|f| f.id.as_str()) }
-
-	pub fn current_owned(&self) -> Option<String> { self.current().map(ToOwned::to_owned) }
-
-	pub fn next_block(&mut self) -> Option<usize> {
-		self.frames.back_mut().map(|f| {
-			f.calls += 1;
-			f.calls - 1
-		})
+	pub fn enter_nested(&mut self, name: &str) {
+		let frame =
+			RuntimeFrame { name: name.into(), ..self.frames.last().cloned().unwrap_or_default() };
+		self.frames.push(frame);
 	}
 
-	pub fn get_block(&self, id: &str, calls: usize) -> Option<Function> {
-		self.blocks.get(id).and_then(|v| v.get(calls)).cloned()
+	pub fn enter_inherited(&mut self, name: &str, blocking: bool) {
+		self.enter(name, blocking, self.scope());
 	}
 
-	pub fn put_block(&mut self, f: Function) -> bool {
-		let Some(cur) = self.frames.back() else { return false };
-		if let Some(v) = self.blocks.get_mut(&cur.id) {
-			v.push(f);
-		} else {
-			self.blocks.insert(cur.id.to_owned(), vec![f]);
-		}
-		true
+	pub fn leave(&mut self) -> Result<()> {
+		self.frames.pop().map(|_| ()).context("Runtime stack underflow")
+	}
+
+	pub fn is_blocking(&self) -> bool { self.frames.last().is_some_and(|f| f.blocking) }
+
+	pub fn scope(&self) -> Scope { self.frames.last().map(|f| f.scope.clone()).unwrap_or_default() }
+
+	pub fn name(&self) -> Result<&str> {
+		self.frames.last().map(|f| f.name.as_str()).context("No current runtime frame")
+	}
+
+	pub fn name_child_scope(&self) -> Result<(CompactString, Scope)> {
+		self
+			.frames
+			.last()
+			.map(|f| (f.name.clone(), f.scope.child()))
+			.context("No current runtime frame")
+	}
+
+	pub fn module(&self) -> Result<&str> {
+		let s = self.name()?;
+		Ok(s.split('.').next().unwrap_or(s))
+	}
+
+	pub fn get_block(&self, name: &str, calls: usize) -> Option<Function> {
+		self.blocks.get(name).and_then(|v| v.get(calls)).cloned()
+	}
+
+	pub fn put_block(&mut self, f: &Function) -> Option<usize> {
+		let cur = self.frames.last().filter(|f| f.name != "init")?;
+		let blocks = self.blocks.entry_ref(&cur.name).or_default();
+
+		blocks.push(f.clone());
+		Some(blocks.len() - 1)
 	}
 }

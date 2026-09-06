@@ -1,22 +1,27 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{Id, SStr, event::CmdCow};
+use yazi_shared::{event::ActionCow, id::Id};
+use yazi_shim::SStr;
 
 #[derive(Debug)]
-pub struct TriggerOpt {
+pub struct TriggerForm {
 	pub word:   SStr,
 	pub ticket: Option<Id>,
 }
 
-impl From<CmdCow> for TriggerOpt {
-	fn from(mut c: CmdCow) -> Self {
-		Self { word: c.take_first_str().unwrap_or_default(), ticket: c.id("ticket") }
+impl From<String> for TriggerForm {
+	fn from(word: String) -> Self { Self { word: word.into(), ticket: None } }
+}
+
+impl From<ActionCow> for TriggerForm {
+	fn from(mut a: ActionCow) -> Self {
+		Self { word: a.take_first().unwrap_or_default(), ticket: a.get("ticket").ok() }
 	}
 }
 
-impl FromLua for TriggerOpt {
+impl FromLua for TriggerForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for TriggerOpt {
+impl IntoLua for TriggerForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

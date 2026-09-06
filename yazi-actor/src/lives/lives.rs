@@ -1,36 +1,38 @@
-use std::cell::RefCell;
+use std::mem::MaybeUninit;
 
 use hashbrown::HashMap;
 use mlua::{AnyUserData, UserData};
 use scopeguard::defer;
-use tracing::error;
+use yazi_macro::error;
 use yazi_plugin::LUA;
-use yazi_shared::RoCell;
 
 use super::{Core, PtrCell};
+use crate::lives::MutCell;
 
-static TO_DESTROY: RoCell<RefCell<Vec<AnyUserData>>> = RoCell::new_const(RefCell::new(Vec::new()));
-pub(super) static FILE_CACHE: RoCell<RefCell<HashMap<PtrCell<yazi_fs::File>, AnyUserData>>> =
-	RoCell::new();
+static TO_DESTROY: MutCell<Vec<AnyUserData>> = MutCell::new(Vec::new());
+pub(super) static FILE_CACHE: MutCell<
+	MaybeUninit<HashMap<PtrCell<yazi_fs::file::File>, AnyUserData>>,
+> = MutCell::new(MaybeUninit::uninit());
 
 pub struct Lives;
 
 impl Lives {
-	pub fn scope<T>(core: &yazi_core::Core, f: impl FnOnce() -> mlua::Result<T>) -> mlua::Result<T> {
-		FILE_CACHE.init(Default::default());
-		defer! { FILE_CACHE.drop(); }
-
-		let result = LUA.scope(|scope| {
-			scope.add_destructor(|| {
-				for ud in TO_DESTROY.borrow_mut().drain(..) {
+	pub fn scope<T, F>(core: &mut yazi_core::Core, f: F) -> mlua::Result<T>
+	where
+		F: FnOnce(&mut yazi_core::Core) -> mlua::Result<T>,
+	{
+		defer! {
+			unsafe {
+				(*FILE_CACHE.get()).assume_init_mut().clear();
+				for ud in (*TO_DESTROY.get()).drain(..) {
 					ud.destroy().expect("failed to destruct scoped userdata");
 				}
-			});
+			}
+		}
 
-			LUA.set_named_registry_value("cx", scope.create_any_userdata_ref(core)?)?;
-			LUA.globals().raw_set("cx", Core::make(core)?)?;
-			f()
-		});
+		LUA.set_named_registry_value("cx", Core::make(core)?)?;
+		LUA.globals().raw_set("cx", Core::make(core)?)?;
+		let result = f(core);
 
 		if let Err(ref e) = result {
 			error!("{e}");
@@ -43,7 +45,7 @@ impl Lives {
 		T: UserData + 'static,
 	{
 		let ud = LUA.create_userdata(data)?;
-		TO_DESTROY.borrow_mut().push(ud.clone());
+		unsafe { &mut *TO_DESTROY.get() }.push(ud.clone());
 		Ok(ud)
 	}
 }

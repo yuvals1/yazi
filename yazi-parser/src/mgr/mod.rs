@@ -1,8 +1,11 @@
 yazi_macro::mod_flat!(
+	bulk_exit
 	cd
 	close
 	copy
 	create
+	displace_do
+	download
 	escape
 	filter
 	find
@@ -15,11 +18,10 @@ yazi_macro::mod_flat!(
 	link
 	open
 	open_do
-	open_with
 	paste
 	peek
-	quit
 	remove
+	remove_do
 	rename
 	reveal
 	search
@@ -27,8 +29,10 @@ yazi_macro::mod_flat!(
 	shell
 	sort
 	spot
+	stash
 	tab_close
 	tab_create
+	tab_rename
 	tab_switch
 	toggle
 	toggle_all
@@ -38,6 +42,9 @@ yazi_macro::mod_flat!(
 	update_peeked
 	update_spotted
 	update_yanked
+	upload
+	visual_arrow
 	visual_mode
+	watch
 	yank
 );

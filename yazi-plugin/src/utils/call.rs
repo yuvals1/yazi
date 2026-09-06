@@ -1,38 +1,40 @@
-use mlua::{Function, Lua, Table};
-use yazi_binding::deprecate;
-use yazi_dds::Sendable;
-use yazi_macro::{emit, render};
-use yazi_shared::{Layer, Source, event::Cmd};
+use mlua::{ExternalError, Function, Lua, Table};
+use tokio::sync::mpsc;
+use yazi_binding::runtime;
+use yazi_macro::emit;
+use yazi_shared::{Layer, Source, data::Sendable, event::{Action, Event}};
 
 use super::Utils;
 
 impl Utils {
-	pub(super) fn render(lua: &Lua) -> mlua::Result<Function> {
-		lua.create_function(|lua, ()| {
-			deprecate!(lua, "`ya.render()` is deprecated, use `ui.render()` instead, in your {}\nSee #2939 for more details: https://github.com/sxyazi/yazi/pull/2939");
-
-			render!();
-			Ok(())
-		})
-	}
-
 	pub(super) fn emit(lua: &Lua) -> mlua::Result<Function> {
 		lua.create_function(|lua, (name, args): (String, Table)| {
-			let mut cmd = Cmd::new(name, Source::Emit, Some(Layer::Mgr))?;
-			cmd.args = Sendable::table_to_args(lua, args)?;
-			Ok(emit!(Call(cmd)))
+			let mut action = Action::new(name, Source::Emit, Layer::Mgr)?;
+			action.args = Sendable::table_to_args(lua, args)?;
+
+			let event = Event::Call(action.into());
+			if runtime!(lua)?.is_blocking() {
+				event.preempt();
+			} else {
+				event.emit();
+			}
+
+			Ok(())
 		})
 	}
 
-	pub(super) fn mgr_emit(lua: &Lua) -> mlua::Result<Function> {
-		lua.create_function(|lua, (name, args): (String, Table)| {
-			emit!(Call(Cmd {
-				name:   name.into(),
-				args:   Sendable::table_to_args(lua, args)?,
-				layer:  Layer::Mgr,
-				source: Source::Emit,
-			}));
-			Ok(())
+	pub(super) fn exec(lua: &Lua) -> mlua::Result<Function> {
+		lua.create_async_function(|lua, (name, args): (String, Table)| async move {
+			let mut action = Action::new(name, Source::Emit, Layer::Mgr)?;
+			action.args = Sendable::table_to_args(&lua, args)?;
+
+			let (tx, mut rx) = mpsc::unbounded_channel();
+			emit!(Call(action.with_replier(tx)));
+
+			Sendable::data_to_value(
+				&lua,
+				rx.recv().await.ok_or_else(|| "channel closed before action response".into_lua_err())??,
+			)
 		})
 	}
 }

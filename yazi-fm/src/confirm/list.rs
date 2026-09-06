@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::{Margin, Rect}, widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget, Wrap}};
+use ratatui_core::{buffer::Buffer, layout::{Margin, Rect}, widgets::{StatefulWidget, Widget}};
+use ratatui_widgets::{block::Block, borders::Borders, paragraph::Wrap, scrollbar::{Scrollbar, ScrollbarOrientation, ScrollbarState}};
 use yazi_config::THEME;
 use yazi_core::Core;
 
@@ -16,7 +17,7 @@ impl Widget for List<'_> {
 		let inner = area.inner(Margin::new(2, 0));
 
 		// Bottom border
-		let block = Block::new().borders(Borders::BOTTOM).border_style(THEME.confirm.border);
+		let block = Block::new().borders(Borders::BOTTOM).border_style(THEME.confirm.border.get());
 		block.clone().render(area.inner(Margin::new(1, 0)), buf);
 
 		let list = self
@@ -26,7 +27,7 @@ impl Widget for List<'_> {
 			.clone()
 			.scroll((self.core.confirm.offset as u16, 0))
 			.block(block)
-			.style(THEME.confirm.list)
+			.style(THEME.confirm.list.get())
 			.wrap(Wrap { trim: false });
 
 		// Vertical scrollbar

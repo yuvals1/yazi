@@ -1,17 +1,17 @@
 use mlua::{AnyUserData, ExternalError, IntoLua, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
-use ratatui::widgets::Widget;
+use ratatui_core::widgets::Widget;
 
 use super::{Area, Span};
-use crate::Style;
+use crate::{elements::Spatial, style::Style};
 
 #[derive(Clone, Debug, Default)]
 pub struct Gauge {
-	pub(super) area: Area,
+	area: Area,
 
 	ratio:       f64,
-	label:       Option<ratatui::text::Span<'static>>,
-	style:       ratatui::style::Style,
-	gauge_style: ratatui::style::Style,
+	label:       Option<ratatui_core::text::Span<'static>>,
+	style:       ratatui_core::style::Style,
+	gauge_style: ratatui_core::style::Style,
 }
 
 impl Gauge {
@@ -23,9 +23,26 @@ impl Gauge {
 
 		gauge.into_lua(lua)
 	}
+}
 
-	pub(super) fn render(self, rect: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-		let mut gauge = ratatui::widgets::Gauge::default()
+impl TryFrom<&AnyUserData> for Gauge {
+	type Error = mlua::Error;
+
+	fn try_from(value: &AnyUserData) -> Result<Self, Self::Error> { value.take() }
+}
+
+impl Spatial for Gauge {
+	fn area(&self) -> Area { self.area }
+
+	fn set_area(&mut self, area: Area) { self.area = area; }
+}
+
+impl Widget for Gauge {
+	fn render(self, rect: ratatui_core::layout::Rect, buf: &mut ratatui_core::buffer::Buffer)
+	where
+		Self: Sized,
+	{
+		let mut gauge = ratatui_widgets::gauge::Gauge::default()
 			.ratio(self.ratio)
 			.style(self.style)
 			.gauge_style(self.gauge_style);
@@ -38,12 +55,21 @@ impl Gauge {
 	}
 }
 
+impl Widget for &Gauge {
+	fn render(self, rect: ratatui_core::layout::Rect, buf: &mut ratatui_core::buffer::Buffer)
+	where
+		Self: Sized,
+	{
+		self.clone().render(rect, buf);
+	}
+}
+
 impl UserData for Gauge {
 	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
 		crate::impl_area_method!(methods);
 		crate::impl_style_method!(methods, style);
 
-		methods.add_function_mut("percent", |_, (ud, percent): (AnyUserData, u8)| {
+		methods.add_function("percent", |_, (ud, percent): (AnyUserData, u8)| {
 			if percent > 100 {
 				return Err("percent must be between 0 and 100".into_lua_err());
 			}
@@ -52,7 +78,7 @@ impl UserData for Gauge {
 			Ok(ud)
 		});
 
-		methods.add_function_mut("ratio", |_, (ud, ratio): (AnyUserData, f64)| {
+		methods.add_function("ratio", |_, (ud, ratio): (AnyUserData, f64)| {
 			if !(0.0..1.0).contains(&ratio) {
 				return Err("ratio must be between 0 and 1".into_lua_err());
 			}
@@ -61,13 +87,13 @@ impl UserData for Gauge {
 			Ok(ud)
 		});
 
-		methods.add_function_mut("label", |_, (ud, label): (AnyUserData, Value)| {
-			ud.borrow_mut::<Self>()?.label = Some(Span::try_from(label)?.0);
+		methods.add_function("label", |_, (ud, label): (AnyUserData, Span)| {
+			ud.borrow_mut::<Self>()?.label = Some(label.0);
 			Ok(ud)
 		});
 
-		methods.add_function_mut("gauge_style", |_, (ud, value): (AnyUserData, Value)| {
-			ud.borrow_mut::<Self>()?.gauge_style = Style::try_from(value)?.0;
+		methods.add_function("gauge_style", |_, (ud, style): (AnyUserData, Style)| {
+			ud.borrow_mut::<Self>()?.gauge_style = style.0;
 			Ok(ud)
 		});
 	}

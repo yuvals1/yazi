@@ -1,32 +1,27 @@
-use anyhow::bail;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{Layer, event::CmdCow};
+use serde::Deserialize;
+use yazi_shared::{Layer, event::ActionCow};
 
-#[derive(Debug)]
-pub struct ToggleOpt {
+#[derive(Debug, Deserialize)]
+pub struct ToggleForm {
+	#[serde(alias = "0")]
 	pub layer: Layer,
 }
 
-impl TryFrom<CmdCow> for ToggleOpt {
+impl TryFrom<ActionCow> for ToggleForm {
 	type Error = anyhow::Error;
 
-	fn try_from(c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(layer) = c.first_str() else {
-			bail!("Invalid 'layer' in Toggle");
-		};
-
-		Ok(Self { layer: layer.parse()? })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl From<Layer> for ToggleOpt {
+impl From<Layer> for ToggleForm {
 	fn from(layer: Layer) -> Self { Self { layer } }
 }
 
-impl FromLua for ToggleOpt {
+impl FromLua for ToggleForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for ToggleOpt {
+impl IntoLua for ToggleForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

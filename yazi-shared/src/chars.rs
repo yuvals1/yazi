@@ -1,30 +1,5 @@
 use core::str;
-use std::{borrow::Cow, ffi::OsStr};
-
-pub const MIME_DIR: &str = "inode/directory";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CharKind {
-	Space,
-	Punct,
-	Other,
-}
-
-impl CharKind {
-	pub fn new(c: char) -> Self {
-		if c.is_whitespace() {
-			Self::Space
-		} else if c.is_ascii_punctuation() {
-			Self::Punct
-		} else {
-			Self::Other
-		}
-	}
-
-	pub fn vary(self, other: Self, far: bool) -> bool {
-		if far { (self == Self::Space) != (other == Self::Space) } else { self != other }
-	}
-}
+use std::borrow::Cow;
 
 pub fn strip_trailing_newline(mut s: String) -> String {
 	while s.ends_with('\n') || s.ends_with('\r') {
@@ -41,17 +16,6 @@ where
 	match replace_cow_impl(&cow, cow.match_indices(from), to) {
 		Cow::Borrowed(_) => cow,
 		Cow::Owned(new) => Cow::Owned(new),
-	}
-}
-
-pub fn replacen_cow<'a, T>(s: T, from: &str, to: &str, n: usize) -> Cow<'a, str>
-where
-	T: Into<Cow<'a, str>>,
-{
-	let cow = s.into();
-	match replace_cow_impl(&cow, cow.match_indices(from).take(n), to) {
-		Cow::Borrowed(_) => cow,
-		Cow::Owned(now) => Cow::Owned(now),
 	}
 }
 
@@ -96,46 +60,48 @@ pub fn replace_vec_cow<'a>(v: &'a [u8], from: &[u8], to: &[u8]) -> Cow<'a, [u8]>
 	Cow::Owned(out)
 }
 
-pub fn replace_to_printable(s: &[String], tab_size: u8) -> String {
-	let mut buf = Vec::new();
-	buf.try_reserve_exact(s.iter().map(|s| s.len()).sum::<usize>() | 15).unwrap_or_else(|_| panic!());
+pub fn replace_to_printable(b: &[u8], lf: bool, tab_size: u8, replacement: bool) -> Cow<'_, [u8]> {
+	// Fast path to skip over printable chars at the beginning of the string
+	let printable_len = b.iter().take_while(|&&c| !c.is_ascii_control()).count();
+	if printable_len >= b.len() {
+		return Cow::Borrowed(b);
+	}
 
-	for &b in s.iter().flat_map(|s| s.as_bytes()) {
-		match b {
-			b'\n' => buf.push(b'\n'),
-			b'\t' => {
-				buf.extend((0..tab_size).map(|_| b' '));
-			}
-			b'\0'..=b'\x1F' => {
+	let (printable, rest) = b.split_at(printable_len);
+
+	let mut out = Vec::new();
+	out.reserve_exact(b.len() | 15);
+	out.extend_from_slice(printable);
+
+	for &c in rest {
+		push_printable_char(&mut out, c, lf, tab_size, replacement);
+	}
+	Cow::Owned(out)
+}
+
+#[inline]
+fn push_printable_char(buf: &mut Vec<u8>, c: u8, lf: bool, tab_size: u8, replacement: bool) {
+	match c {
+		b'\n' if lf => buf.push(b'\n'),
+		b'\t' => {
+			buf.extend((0..tab_size).map(|_| b' '));
+		}
+		b'\0'..=b'\x1F' => {
+			if replacement {
+				buf.extend_from_slice(&[0xef, 0xbf, 0xbd]);
+			} else {
 				buf.push(b'^');
-				buf.push(b + b'@');
+				buf.push(c + b'@');
 			}
-			0x7f => {
+		}
+		0x7f => {
+			if replacement {
+				buf.extend_from_slice(&[0xef, 0xbf, 0xbd]);
+			} else {
 				buf.push(b'^');
 				buf.push(b'?');
 			}
-			_ => buf.push(b),
 		}
-	}
-	unsafe { String::from_utf8_unchecked(buf) }
-}
-
-pub fn osstr_contains(s: impl AsRef<OsStr>, needle: impl AsRef<OsStr>) -> bool {
-	memchr::memmem::find(s.as_ref().as_encoded_bytes(), needle.as_ref().as_encoded_bytes()).is_some()
-}
-
-pub fn osstr_starts_with(
-	s: impl AsRef<OsStr>,
-	prefix: impl AsRef<OsStr>,
-	insensitive: bool,
-) -> bool {
-	let (s, prefix) = (s.as_ref().as_encoded_bytes(), prefix.as_ref().as_encoded_bytes());
-	if s.len() < prefix.len() {
-		return false;
-	}
-	if insensitive {
-		s[..prefix.len()].eq_ignore_ascii_case(prefix)
-	} else {
-		s[..prefix.len()] == *prefix
+		_ => buf.push(c),
 	}
 }

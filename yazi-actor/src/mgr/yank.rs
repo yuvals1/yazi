@@ -1,23 +1,23 @@
 use anyhow::Result;
 use yazi_core::mgr::Yanked;
 use yazi_macro::{act, render};
-use yazi_parser::mgr::YankOpt;
-use yazi_shared::{event::Data, url::UrlBufCov};
+use yazi_parser::mgr::YankForm;
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct Yank;
 
 impl Actor for Yank {
-	type Options = YankOpt;
+	type Form = YankForm;
 
 	const NAME: &str = "yank";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
 		act!(mgr:escape_visual, cx)?;
 
 		cx.mgr.yanked =
-			Yanked::new(opt.cut, cx.tab().selected_or_hovered().cloned().map(UrlBufCov).collect());
+			Yanked::new(form.cut, cx.tab().selected_or_hovered_files().map(Into::into).collect());
 		render!(cx.mgr.yanked.catchup_revision(true));
 
 		act!(mgr:escape_select, cx)

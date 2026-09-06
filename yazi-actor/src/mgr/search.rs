@@ -1,35 +1,37 @@
-use std::{borrow::Cow, mem, time::Duration};
+use std::{borrow::Cow, time::Duration};
 
 use anyhow::Result;
 use tokio::pin;
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
-use yazi_config::popup::InputCfg;
-use yazi_fs::{FilesOp, cha::Cha};
-use yazi_macro::{act, succ};
-use yazi_parser::{VoidOpt, mgr::{SearchOpt, SearchOptVia}};
+use yazi_config::YAZI;
+use yazi_core::mgr::{CdSource, SearchVia};
+use yazi_fs::{FilesOp, cha::ChaType, file::File};
+use yazi_macro::{act, input, succ};
+use yazi_parser::{VoidForm, mgr::SearchForm};
 use yazi_plugin::external;
-use yazi_proxy::{InputProxy, MgrProxy};
-use yazi_shared::event::Data;
+use yazi_proxy::MgrProxy;
+use yazi_scheduler::NotifyProxy;
+use yazi_shared::{data::Data, url::{AsUrl, UrlLike}};
+use yazi_widgets::input::InputEvent;
 
 use crate::{Actor, Ctx};
 
 pub struct Search;
 
 impl Actor for Search {
-	type Options = SearchOpt;
+	type Form = SearchForm;
 
 	const NAME: &str = "search";
 
-	fn act(cx: &mut Ctx, mut opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, Self::Form { mut opt }: Self::Form) -> Result<Data> {
 		if let Some(handle) = cx.tab_mut().search.take() {
 			handle.abort();
 		}
 
-		let mut input =
-			InputProxy::show(InputCfg::search(opt.via.into_str()).with_value(&*opt.subject));
+		let mut input = input!(cx, YAZI.input.search(opt.via.into()).with_value(&*opt.subject))?;
 
 		tokio::spawn(async move {
-			if let Some(Ok(subject)) = input.recv().await {
+			if let Some(InputEvent::Submit(subject)) = input.recv().await {
 				opt.subject = Cow::Owned(subject);
 				MgrProxy::search_do(opt);
 			}
@@ -42,34 +44,37 @@ impl Actor for Search {
 pub struct SearchDo;
 
 impl Actor for SearchDo {
-	type Options = SearchOpt;
+	type Form = SearchForm;
 
 	const NAME: &str = "search_do";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, Self::Form { opt }: Self::Form) -> Result<Data> {
 		let tab = cx.tab_mut();
 		if let Some(handle) = tab.search.take() {
 			handle.abort();
 		}
 
-		let cwd = tab.cwd().to_search(opt.subject.as_ref());
 		let hidden = tab.pref.show_hidden;
+		let r#in = opt.r#in.as_ref().map_or_else(|| tab.cwd().as_url(), |u| u.as_url());
+		let Ok(cwd) = r#in.to_search(&opt.subject) else {
+			succ!(NotifyProxy::push_warn("Search", "Only local filesystem searches are supported"));
+		};
 
 		tab.search = Some(tokio::spawn(async move {
 			let rx = match opt.via {
-				SearchOptVia::Rg => external::rg(external::RgOpt {
+				SearchVia::Rg => external::rg(external::RgOpt {
 					cwd: cwd.clone(),
 					hidden,
 					subject: opt.subject.into_owned(),
 					args: opt.args,
 				}),
-				SearchOptVia::Rga => external::rga(external::RgaOpt {
+				SearchVia::Rga => external::rga(external::RgaOpt {
 					cwd: cwd.clone(),
 					hidden,
 					subject: opt.subject.into_owned(),
 					args: opt.args,
 				}),
-				SearchOptVia::Fd => external::fd(external::FdOpt {
+				SearchVia::Fd => external::fd(external::FdOpt {
 					cwd: cwd.clone(),
 					hidden,
 					subject: opt.subject.into_owned(),
@@ -80,11 +85,11 @@ impl Actor for SearchDo {
 			let rx = UnboundedReceiverStream::new(rx).chunks_timeout(5000, Duration::from_millis(500));
 			pin!(rx);
 
-			let ((), ticket) = (MgrProxy::cd(&cwd), FilesOp::prepare(&cwd));
+			let ((), ticket) = (MgrProxy::cd(&cwd, CdSource::Search), FilesOp::prepare(&cwd));
 			while let Some(chunk) = rx.next().await {
 				FilesOp::Part(cwd.clone(), chunk, ticket).emit();
 			}
-			FilesOp::Done(cwd, Cha::default(), ticket).emit();
+			FilesOp::Done(File::from_dummy(cwd, Some(ChaType::Dir)), ticket).emit();
 
 			Ok(())
 		}));
@@ -97,11 +102,11 @@ impl Actor for SearchDo {
 pub struct SearchStop;
 
 impl Actor for SearchStop {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "search_stop";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		let tab = cx.tab_mut();
 		if let Some(handle) = tab.search.take() {
 			handle.abort();
@@ -111,11 +116,10 @@ impl Actor for SearchStop {
 			succ!();
 		}
 
-		let rep = tab.history.remove_or(&tab.cwd().to_regular());
-		drop(mem::replace(&mut tab.current, rep));
-
-		act!(mgr:hidden, cx)?;
-		act!(mgr:sort, cx)?;
-		act!(mgr:refresh, cx)
+		if let Some(u) = tab.backstack.current().cloned() {
+			act!(mgr:cd, cx, (u, CdSource::Escape))
+		} else {
+			act!(mgr:cd, cx, (tab.cwd().to_regular()?, CdSource::Escape))
+		}
 	}
 }

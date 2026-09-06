@@ -1,6 +1,7 @@
 Root = {
 	_id = "root",
-	_drag_start = ui.Rect {},
+	_dragging = nil,
+	_dropping = nil,
 }
 
 function Root:new(area)
@@ -24,6 +25,7 @@ end
 
 function Root:build()
 	self._children = {
+		Backdrop:new(self._area),
 		Header:new(self._chunks[1], cx.active),
 		Tabs:new(self._chunks[2]),
 		Tab:new(self._chunks[3], cx.active),
@@ -50,11 +52,12 @@ end
 
 -- Mouse events
 function Root:click(event, up)
-	if tostring(cx.layer) ~= "mgr" then
-		return
-	end
 	local c = ya.child_at(ui.Rect { x = event.x, y = event.y }, self:reflow())
-	return c and c:click(event, up)
+	Root._dragging = not up and c or nil
+
+	if tostring(cx.layer) == "mgr" then
+		return c and c.click and c:click(event, up)
+	end
 end
 
 function Root:scroll(event, step)
@@ -62,7 +65,7 @@ function Root:scroll(event, step)
 		return
 	end
 	local c = ya.child_at(ui.Rect { x = event.x, y = event.y }, self:reflow())
-	return c and c:scroll(event, step)
+	return c and c.scroll and c:scroll(event, step)
 end
 
 function Root:touch(event, step)
@@ -70,9 +73,46 @@ function Root:touch(event, step)
 		return
 	end
 	local c = ya.child_at(ui.Rect { x = event.x, y = event.y }, self:reflow())
-	return c and c:touch(event, step)
+	return c and c.touch and c:touch(event, step)
 end
 
 function Root:move(event) end
 
-function Root:drag(event) end
+function Root:drag(event)
+	if tostring(cx.layer) ~= "mgr" then
+		return
+	end
+
+	local c = Root._dragging
+	return c and c.drag and c:drag(event)
+end
+
+function Root:drop(event)
+	local d = Root._dropping
+	local c = event.x and ya.child_at(ui.Rect { x = event.x, y = event.y }, self:reflow()) or d
+	if d and d.drop and d._id ~= c._id then
+		d:drop { type = "leave" }
+	end
+
+	Root._dropping = c
+	if tostring(cx.layer) == "mgr" then
+		return c and c.drop and c:drop(event)
+	end
+end
+
+function Root:clipboard(event)
+	if event.type ~= "read" then
+		return
+	elseif event.data["."] then
+		local mime = tostring(cx.layer) == "input" and "text/plain" or "text/uri-list"
+		return require("clipboard").read_unsolicited(mime, event)
+	end
+
+	local data = event.data
+	local text, uri = data["text/plain"], data["text/uri-list"]
+	if tostring(cx.layer) == "input" and text then
+		ya.emit("input:feed", { text })
+	elseif uri then
+		require("clipboard").copy_uri_list(uri)
+	end
+end

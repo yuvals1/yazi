@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::{Margin, Rect}, widgets::{Block, BorderType, Widget}};
+use ratatui_core::{buffer::Buffer, layout::{Margin, Rect}, widgets::Widget};
+use ratatui_widgets::{block::Block, borders::BorderType};
 use yazi_config::THEME;
 use yazi_core::Core;
 
@@ -17,12 +18,12 @@ impl Widget for Pick<'_> {
 		let pick = &self.core.pick;
 		let area = self.core.mgr.area(pick.position);
 
-		yazi_binding::elements::Clear::default().render(area, buf);
+		yazi_widgets::clear::Clear::default().render(area, buf);
 
 		Block::bordered()
 			.title(pick.title())
 			.border_type(BorderType::Rounded)
-			.border_style(THEME.pick.border)
+			.border_style(THEME.pick.border.get())
 			.render(area, buf);
 
 		List::new(self.core).render(area.inner(Margin::new(0, 1)), buf);

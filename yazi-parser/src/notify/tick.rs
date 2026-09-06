@@ -1,34 +1,28 @@
 use std::time::Duration;
 
-use anyhow::bail;
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::{CmdCow, Data};
+use serde::Deserialize;
+use serde_with::{DurationSecondsWithFrac, serde_as};
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug)]
-pub struct TickOpt {
+#[serde_as]
+#[derive(Debug, Default, Deserialize)]
+pub struct TickForm {
+	#[serde(alias = "0")]
+	#[serde_as(as = "DurationSecondsWithFrac<f64>")]
 	pub interval: Duration,
 }
 
-impl TryFrom<CmdCow> for TickOpt {
+impl TryFrom<ActionCow> for TickForm {
 	type Error = anyhow::Error;
 
-	fn try_from(c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(interval) = c.first().and_then(Data::as_f64) else {
-			bail!("Invalid 'interval' argument in TickOpt");
-		};
-
-		if interval < 0.0 {
-			bail!("'interval' must be non-negative in TickOpt");
-		}
-
-		Ok(Self { interval: Duration::from_secs_f64(interval) })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for TickOpt {
+impl FromLua for TickForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for TickOpt {
+impl IntoLua for TickForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

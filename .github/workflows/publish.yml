@@ -4,11 +4,43 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
+  tag:
+    if: ${{ !github.event.release.prerelease }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Update shipped tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git tag --force shipped "${RELEASE_TAG}^{commit}"
+          git push --force origin tag shipped
+
+  apt:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish APT stable
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.BUILDS_TOKEN }}
+          repository: yazi-rs/builds
+          event-type: publish-apt
+
   winget:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
@@ -19,6 +51,10 @@ jobs:
           installers-regex: 'yazi-(x86_64|aarch64)-pc-windows-msvc\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}
 
+  snapcraft:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Promote snap to stable
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_TOKEN }}

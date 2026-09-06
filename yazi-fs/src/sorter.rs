@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 
 use hashbrown::HashMap;
-use yazi_shared::{LcgRng, natsort, translit::Transliterator, url::UrnBuf};
+use rand::{Rng, make_rng, rngs::SmallRng};
+use yazi_shared::{natsort, path::PathBufDyn, translit::Transliterator, url::UrlLike};
 
-use crate::{File, SortBy};
+use crate::{SortBy, SortFallback, file::File};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FilesSorter {
@@ -12,111 +13,128 @@ pub struct FilesSorter {
 	pub reverse:   bool,
 	pub dir_first: bool,
 	pub translit:  bool,
+	pub fallback:  SortFallback,
 }
 
 impl FilesSorter {
-	pub(super) fn sort(&self, items: &mut [File], sizes: &HashMap<UrnBuf, u64>) {
+	pub(super) fn sort(&self, items: &mut [File], sizes: &HashMap<PathBufDyn, u64>) {
 		if items.is_empty() {
 			return;
 		}
 
-		let by_alphabetical = |a: &File, b: &File| {
-			if self.sensitive {
-				self.cmp(a.urn().encoded_bytes(), b.urn().encoded_bytes(), self.promote(a, b))
-			} else {
-				self.cmp_insensitive(a.urn().encoded_bytes(), b.urn().encoded_bytes(), self.promote(a, b))
-			}
-		};
+		macro_rules! promote {
+			($a:ident, $b:ident) => {
+				if self.dir_first {
+					match $b.is_dir().cmp(&$a.is_dir()) {
+						Ordering::Equal => {}
+						not_eq => return not_eq,
+					}
+				}
+			};
+		}
 
 		match self.by {
 			SortBy::None => {}
 			SortBy::Mtime => items.sort_unstable_by(|a, b| {
-				let ord = self.cmp(a.mtime, b.mtime, self.promote(a, b));
-				if ord == Ordering::Equal { by_alphabetical(a, b) } else { ord }
+				promote!(a, b);
+				self.fallback(a, b, self.cmp(a.mtime, b.mtime))
 			}),
 			SortBy::Btime => items.sort_unstable_by(|a, b| {
-				let ord = self.cmp(a.btime, b.btime, self.promote(a, b));
-				if ord == Ordering::Equal { by_alphabetical(a, b) } else { ord }
+				promote!(a, b);
+				self.fallback(a, b, self.cmp(a.btime, b.btime))
 			}),
 			SortBy::Extension => items.sort_unstable_by(|a, b| {
+				promote!(a, b);
+				let aa = a.url.ext().filter(|_| a.is_file());
+				let bb = b.url.ext().filter(|_| b.is_file());
 				let ord = if self.sensitive {
-					self.cmp(a.url.ext(), b.url.ext(), self.promote(a, b))
+					self.cmp(aa, bb)
 				} else {
 					self.cmp_insensitive(
-						a.url.ext().map_or(&[], |s| s.as_encoded_bytes()),
-						b.url.ext().map_or(&[], |s| s.as_encoded_bytes()),
-						self.promote(a, b),
+						aa.map_or(&[], |s| s.encoded_bytes()),
+						bb.map_or(&[], |s| s.encoded_bytes()),
 					)
 				};
-				if ord == Ordering::Equal { by_alphabetical(a, b) } else { ord }
+				self.fallback(a, b, ord)
 			}),
-			SortBy::Alphabetical => items.sort_unstable_by(by_alphabetical),
-			SortBy::Natural => self.sort_naturally(items),
+			SortBy::Alphabetical => items.sort_unstable_by(|a, b| {
+				promote!(a, b);
+				self.fallback(a, b, self.sort_alphabetically(a, b))
+			}),
+			SortBy::Natural => items.sort_unstable_by(|a, b| {
+				promote!(a, b);
+				self.fallback(a, b, self.sort_naturally(a, b))
+			}),
 			SortBy::Size => items.sort_unstable_by(|a, b| {
-				let aa = if a.is_dir() { sizes.get(a.urn()).copied() } else { None };
-				let bb = if b.is_dir() { sizes.get(b.urn()).copied() } else { None };
-				let ord = self.cmp(aa.unwrap_or(a.len), bb.unwrap_or(b.len), self.promote(a, b));
-				if ord == Ordering::Equal { by_alphabetical(a, b) } else { ord }
+				promote!(a, b);
+				let aa = if a.is_dir() { sizes.get(&a.key()).copied() } else { None };
+				let bb = if b.is_dir() { sizes.get(&b.key()).copied() } else { None };
+				self.fallback(a, b, self.cmp(aa.unwrap_or(a.len), bb.unwrap_or(b.len)))
 			}),
 			SortBy::Random => {
-				let mut rng = LcgRng::default();
-				items.sort_unstable_by(|a, b| self.cmp(rng.next(), rng.next(), self.promote(a, b)))
+				let mut rng = make_rng::<SmallRng>();
+				items.sort_unstable_by(|a, b| {
+					promote!(a, b);
+					self.cmp(rng.next_u64(), rng.next_u64())
+				})
 			}
 		}
 	}
 
-	fn sort_naturally(&self, items: &mut [File]) {
-		items.sort_unstable_by(|a, b| {
-			let promote = self.promote(a, b);
-			if promote != Ordering::Equal {
-				return promote;
-			}
-
-			let ordering = if self.translit {
-				natsort(
-					a.urn().encoded_bytes().transliterate().as_bytes(),
-					b.urn().encoded_bytes().transliterate().as_bytes(),
-					!self.sensitive,
-				)
-			} else {
-				natsort(a.urn().encoded_bytes(), b.urn().encoded_bytes(), !self.sensitive)
-			};
-
-			if self.reverse { ordering.reverse() } else { ordering }
-		});
-	}
-
 	#[inline(always)]
-	#[allow(clippy::collapsible_else_if)]
-	fn cmp<T: Ord>(&self, a: T, b: T, promote: Ordering) -> Ordering {
-		if promote != Ordering::Equal {
-			promote
+	fn sort_alphabetically(&self, a: &File, b: &File) -> Ordering {
+		if self.sensitive {
+			self.cmp(a.urn().encoded_bytes(), b.urn().encoded_bytes())
 		} else {
-			if self.reverse { b.cmp(&a) } else { a.cmp(&b) }
+			self.cmp_insensitive(a.urn().encoded_bytes(), b.urn().encoded_bytes())
 		}
 	}
 
 	#[inline(always)]
-	fn cmp_insensitive(&self, a: &[u8], b: &[u8], promote: Ordering) -> Ordering {
-		if promote != Ordering::Equal {
-			return promote;
+	fn sort_naturally(&self, a: &File, b: &File) -> Ordering {
+		let ordering = if self.translit {
+			natsort(
+				a.urn().encoded_bytes().transliterate().as_bytes(),
+				b.urn().encoded_bytes().transliterate().as_bytes(),
+				!self.sensitive,
+			)
+		} else {
+			natsort(a.urn().encoded_bytes(), b.urn().encoded_bytes(), !self.sensitive)
+		};
+
+		if self.reverse { ordering.reverse() } else { ordering }
+	}
+
+	#[inline(always)]
+	fn fallback(&self, a: &File, b: &File, ord: Ordering) -> Ordering {
+		if ord != Ordering::Equal {
+			return ord;
 		}
 
+		match self.fallback {
+			SortFallback::Alphabetical => self.cmp(a.urn().encoded_bytes(), b.urn().encoded_bytes()),
+			SortFallback::Natural => {
+				let ord = natsort(a.urn().encoded_bytes(), b.urn().encoded_bytes(), false);
+				if self.reverse { ord.reverse() } else { ord }
+			}
+		}
+	}
+
+	#[inline(always)]
+	fn cmp<T: Ord>(&self, a: T, b: T) -> Ordering { if self.reverse { b.cmp(&a) } else { a.cmp(&b) } }
+
+	#[inline(always)]
+	fn cmp_insensitive(&self, a: &[u8], b: &[u8]) -> Ordering {
 		let l = a.len().min(b.len());
 		let (lhs, rhs) = if self.reverse { (&b[..l], &a[..l]) } else { (&a[..l], &b[..l]) };
 
 		for i in 0..l {
 			match lhs[i].to_ascii_lowercase().cmp(&rhs[i].to_ascii_lowercase()) {
-				Ordering::Equal => (),
+				Ordering::Equal => {}
 				not_eq => return not_eq,
 			}
 		}
 
 		if self.reverse { b.len().cmp(&a.len()) } else { a.len().cmp(&b.len()) }
-	}
-
-	#[inline(always)]
-	fn promote(&self, a: &File, b: &File) -> Ordering {
-		if self.dir_first { b.is_dir().cmp(&a.is_dir()) } else { Ordering::Equal }
 	}
 }

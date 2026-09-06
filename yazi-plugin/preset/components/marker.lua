@@ -24,12 +24,12 @@ function Marker:redraw()
 
 		local y = math.min(self._area.y + last[1], self._area.y + self._area.h) - 1
 		local rect = ui.Rect {
-			x = math.max(0, self._area.x - 1),
+			x = self._area.x,
 			y = y,
 			w = 1,
 			h = math.min(1 + last[2] - last[1], self._area.y + self._area.h - y),
 		}
-		elements[#elements + 1] = ui.Bar(ui.Edge.LEFT):area(rect):style(last[3])
+		elements[#elements + 1] = ui.Bar(ui.Edge.LEFT):area(rect):style(last[3]):symbol(th.mgr.marker_symbol)
 	end
 
 	local last = { 0, 0, nil } -- start, end, style

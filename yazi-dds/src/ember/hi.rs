@@ -1,30 +1,30 @@
 use std::borrow::Cow;
 
 use hashbrown::HashSet;
-use mlua::{ExternalResult, IntoLua, Lua, Value};
+use mlua::{IntoLua, Lua, Value};
 use serde::{Deserialize, Serialize};
-use yazi_shared::SStr;
+use yazi_shim::SStr;
 
 use super::Ember;
 
 /// Client handshake
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmberHi<'a> {
 	/// Kinds of events the client can handle
-	pub abilities: HashSet<Cow<'a, str>>,
-	pub version:   SStr,
+	pub(crate) abilities: HashSet<Cow<'a, str>>,
+	version:              SStr,
 }
 
 impl<'a> EmberHi<'a> {
 	pub fn borrowed<I>(abilities: I) -> Ember<'a>
 	where
-		I: Iterator<Item = &'a str>,
+		I: IntoIterator<Item = &'a str>,
 	{
-		Self { abilities: abilities.map(Into::into).collect(), version: Self::version().into() }.into()
-	}
-
-	pub fn version() -> &'static str {
-		concat!(env!("CARGO_PKG_VERSION"), " ", env!("VERGEN_GIT_SHA"))
+		Self {
+			abilities: abilities.into_iter().map(Into::into).collect(),
+			version:   yazi_version::version().into(),
+		}
+		.into()
 	}
 }
 
@@ -33,7 +33,5 @@ impl<'a> From<EmberHi<'a>> for Ember<'a> {
 }
 
 impl IntoLua for EmberHi<'_> {
-	fn into_lua(self, _: &Lua) -> mlua::Result<Value> {
-		Err("BodyHi cannot be converted to Lua").into_lua_err()
-	}
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> { lua.create_table()?.into_lua(lua) }
 }

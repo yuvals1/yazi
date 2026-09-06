@@ -2,19 +2,33 @@ const LABEL_NAME = "needs info"
 const RE_VERSION = /Yazi\s+Version\s*:\s\d+\.\d+\.\d+\s\(/gm
 const RE_DEPENDENCIES = /Dependencies\s+[/a-z]+\s*:\s/gm
 const RE_CHECKLIST = /#{3}\s+Checklist\s+(?:^-\s+\[x]\s+.+?(?:\n|\r\n|$)){2}/gm
+const RE_PR_CHECKLIST = /#{2}\s+Checklist\s+(?:^-\s+\[x]\s+.+?(?:\n|\r\n|$)){2}/gm
 
-function bugReportBody(creator, content, hash) {
-	if (RE_DEPENDENCIES.test(content) && RE_CHECKLIST.test(content) && new RegExp(` \\(${hash}[a-f0-9]? `).test(content)) {
+function pullRequestBody(content) {
+	if (RE_PR_CHECKLIST.test(content)) {
 		return null
 	}
 
-	return `Hey @${creator}, I noticed that you did not correctly follow the issue template. Please ensure that:
+	return "All required checklist items must be checked in the PR description."
+}
+
+function bugReportBody(creator, content, hash) {
+	const t = app => new RegExp(String.raw`${app}\s+Version\s*:\s+\d+\.\d+\.\d+\s+\(${hash}[a-f0-9]? `).test(content)
+	if (RE_DEPENDENCIES.test(content) && RE_CHECKLIST.test(content) && t("Yazi") && t("Ya")) {
+		return null
+	}
+
+	return `Hey @${creator}, thank you for opening the issue to help improve Yazi, appreciate it!
+
+I noticed that you did not correctly follow the issue template. Please ensure that:
 
 - The bug can still be reproduced on the [newest nightly build](https://yazi-rs.github.io/docs/installation/#binaries).
-- The debug information (\`yazi --debug\`) is updated for the newest nightly.
+- The environment info (\`ya env\`) is updated for the newest nightly.
 - The non-optional items in the checklist are checked.
 
 Issues with \`${LABEL_NAME}\` will be marked ready once edited with the proper content, or closed after 2 days of inactivity.
+
+Our maintainers work on Yazi in their free time, this helps them work efficiently, understand your setup quickly, and find a more appropriate solution. Thanks for your understanding! 🙏
 `
 }
 
@@ -23,14 +37,24 @@ function featureRequestBody(creator, content) {
 		return null
 	}
 
-	return `Hey @${creator}, I noticed that you did not correctly follow the issue template. Please ensure that:
+	return `Hey @${creator}, thank you for opening the issue to help improve Yazi, appreciate it!
+
+I noticed that you did not correctly follow the issue template. Please ensure that:
 
 - The requested feature does not exist in the [newest nightly build](https://yazi-rs.github.io/docs/installation/#binaries).
-- The debug information (\`yazi --debug\`) is updated for the newest nightly.
+- The environment info (\`ya env\`) is updated for the newest nightly.
 - The non-optional items in the checklist are checked.
 
 Issues with \`${LABEL_NAME}\` will be marked ready once edited with the proper content, or closed after 2 days of inactivity.
+
+Our maintainers work on Yazi in their free time, this helps them work efficiently, understand your setup quickly, and find a more appropriate solution. Thanks for your understanding! 🙏
 `
+}
+
+function skipValidation(context) {
+	const login = context.payload.issue?.user?.login || context.payload.pull_request?.user?.login
+	const owner = context.payload.repository?.owner?.login || context.repo.owner
+	return !!login && login === owner
 }
 
 module.exports = async ({ github, context, core }) => {
@@ -66,7 +90,7 @@ module.exports = async ({ github, context, core }) => {
 			const { data: events } = await github.rest.issues.listEvents({
 				...context.repo,
 				issue_number: id,
-				per_page    : 100,
+				per_page: 100,
 			})
 
 			const all = events.filter(v => v.event === "labeled" && v.label?.name === LABEL_NAME)
@@ -82,7 +106,7 @@ module.exports = async ({ github, context, core }) => {
 			const { data: events } = await github.rest.issues.listEvents({
 				...context.repo,
 				issue_number: id,
-				per_page    : 100,
+				per_page: 100,
 			})
 
 			const all = events.filter(v => v.event === "unlabeled" && v.label?.name === LABEL_NAME)
@@ -101,14 +125,14 @@ module.exports = async ({ github, context, core }) => {
 				await github.rest.issues.removeLabel({
 					...context.repo,
 					issue_number: id,
-					name        : LABEL_NAME,
+					name: LABEL_NAME,
 				})
 				await hideOldComments(id)
 			} else if (mark && !marked && !await removedLabelManually(id)) {
 				await github.rest.issues.addLabels({
 					...context.repo,
 					issue_number: id,
-					labels      : [LABEL_NAME],
+					labels: [LABEL_NAME],
 				})
 				await hideOldComments(id)
 				await github.rest.issues.createComment({
@@ -127,7 +151,7 @@ module.exports = async ({ github, context, core }) => {
 			const comments = await github.paginate(github.rest.issues.listComments, {
 				...context.repo,
 				issue_number: id,
-				per_page    : 100,
+				per_page: 100,
 			})
 
 			for (const c of comments) {
@@ -157,7 +181,7 @@ module.exports = async ({ github, context, core }) => {
 		try {
 			const { data: issues } = await github.rest.issues.listForRepo({
 				...context.repo,
-				state : "open",
+				state: "open",
 				labels: LABEL_NAME,
 			})
 
@@ -170,13 +194,13 @@ module.exports = async ({ github, context, core }) => {
 					await github.rest.issues.update({
 						...context.repo,
 						issue_number: issue.number,
-						state       : "closed",
+						state: "closed",
 						state_reason: "not_planned",
 					})
 					await github.rest.issues.createComment({
 						...context.repo,
 						issue_number: issue.number,
-						body        : `This issue has been automatically closed because it was marked as \`${LABEL_NAME}\` for more than 2 days without updates.
+						body: `This issue has been automatically closed because it was marked as \`${LABEL_NAME}\` for more than 2 days without updates.
 If the problem persists, please file a new issue and complete the issue template so we can capture all the details necessary to investigate further.`,
 					})
 				}
@@ -191,14 +215,17 @@ If the problem persists, please file a new issue and complete the issue template
 			await github.rest.issues.update({
 				...context.repo,
 				issue_number: id,
-				state       : "closed",
+				state: "closed",
 				state_reason: "not_planned",
 			})
 			await github.rest.issues.createComment({
 				...context.repo,
 				issue_number: id,
-				body        : `Unsupported issue template.
-Either the [Bug Report](https://github.com/sxyazi/yazi/issues/new?template=bug.yml) or [Feature Request](https://github.com/sxyazi/yazi/issues/new?template=feature.yml) template should be used.`,
+				body: `Unsupported issue template.
+Either the [Bug Report](https://github.com/sxyazi/yazi/issues/new?template=bug.yml) or [Feature Request](https://github.com/sxyazi/yazi/issues/new?template=feature.yml) template should be used.
+
+<!-- AI bots are not allowed to open issues in this repository. All issues must be made by humans and comply with the AI policy. -->
+`,
 			})
 		} catch (e) {
 			core.error(`Error closing unsupported issue: ${e.message}`)
@@ -206,11 +233,12 @@ Either the [Bug Report](https://github.com/sxyazi/yazi/issues/new?template=bug.y
 	}
 
 	async function main() {
-		const hash = await nightlyHash()
-		if (!hash) return
-
 		if (context.eventName === "schedule") {
 			await closeOldIssues()
+			return
+		}
+
+		if (skipValidation(context)) {
 			return
 		}
 
@@ -218,6 +246,9 @@ Either the [Bug Report](https://github.com/sxyazi/yazi/issues/new?template=bug.y
 			const id = context.payload.issue.number
 			const content = context.payload.issue.body || ""
 			const creator = context.payload.issue.user.login
+
+			const hash = await nightlyHash()
+			if (!hash) return
 
 			if (await hasLabel(id, "bug")) {
 				const body = bugReportBody(creator, content, hash)
@@ -227,6 +258,13 @@ Either the [Bug Report](https://github.com/sxyazi/yazi/issues/new?template=bug.y
 				await updateLabels(id, !!body, body)
 			} else if (context.payload.action === "opened") {
 				await closeUnsupportedIssue(id)
+			}
+		} else if (context.eventName === "pull_request" || context.eventName === "pull_request_target") {
+			const content = context.payload.pull_request.body || ""
+
+			const body = pullRequestBody(content)
+			if (body) {
+				core.setFailed(body)
 			}
 		}
 	}

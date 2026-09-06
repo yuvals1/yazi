@@ -1,34 +1,56 @@
-use std::{borrow::Cow, ffi::OsStr, fmt::{Debug, Formatter}, hash::BuildHasher, path::{Path, PathBuf}, str::FromStr};
+use std::{borrow::Cow, fmt::{Debug, Formatter}, hash::{Hash, Hasher}, path::{Path, PathBuf}, str::FromStr, sync::Arc};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::{self, IntoDeserializer}};
+use yazi_codegen::FromLuaOwned;
+use yazi_macro::impl_data_any;
 
-use crate::{loc::LocBuf, pool::Pool, scheme::{Scheme, SchemeRef}, url::{Components, Display, Encode, EncodeTilded, Uri, Url, UrlCow, Urn}};
+use crate::{auth::{Auth, Domain}, loc::LocBuf, path::{PathBufDyn, PathDynError, SetNameError}, spec::Spec, strand::AsStrand, url::{AsUrl, Url, UrlCow, UrlDeserializer}};
 
-#[derive(Clone, Default, Eq, Hash, PartialEq)]
-pub struct UrlBuf {
-	pub loc:    LocBuf,
-	pub scheme: Scheme,
+#[derive(Clone, Eq, FromLuaOwned)]
+pub enum UrlBuf {
+	Regular(LocBuf),
+	Search { loc: LocBuf, auth: Arc<Auth> },
+	Mount { loc: LocBuf, auth: Arc<Auth> },
+	Hub { loc: LocBuf, auth: Arc<Auth> },
+	Scope { loc: LocBuf<typed_path::UnixPathBuf>, auth: Arc<Auth> },
+	Sftp { loc: LocBuf<typed_path::UnixPathBuf>, auth: Arc<Auth> },
 }
 
-impl From<LocBuf> for UrlBuf {
-	fn from(loc: LocBuf) -> Self { Self { loc, scheme: Scheme::Regular } }
-}
+impl_data_any!(UrlBuf);
 
-impl From<PathBuf> for UrlBuf {
-	fn from(path: PathBuf) -> Self { LocBuf::from(path).into() }
-}
-
-impl From<&Url<'_>> for UrlBuf {
-	fn from(url: &Url<'_>) -> Self { Self { loc: url.loc.into(), scheme: url.scheme.into() } }
-}
-
-impl From<Url<'_>> for UrlBuf {
-	fn from(url: Url<'_>) -> Self { Self { loc: url.loc.into(), scheme: url.scheme.into() } }
+// FIXME: remove
+impl Default for UrlBuf {
+	fn default() -> Self { Self::Regular(Default::default()) }
 }
 
 impl From<&Self> for UrlBuf {
 	fn from(url: &Self) -> Self { url.clone() }
+}
+
+impl From<Url<'_>> for UrlBuf {
+	fn from(url: Url<'_>) -> Self {
+		match url {
+			Url::Regular(loc) => Self::Regular(loc.into()),
+			Url::Search { loc, auth } => Self::Search { loc: loc.into(), auth: auth.clone() },
+			Url::Mount { loc, auth } => Self::Mount { loc: loc.into(), auth: auth.clone() },
+			Url::Hub { loc, auth } => Self::Hub { loc: loc.into(), auth: auth.clone() },
+			Url::Scope { loc, auth } => Self::Scope { loc: loc.into(), auth: auth.clone() },
+			Url::Sftp { loc, auth } => Self::Sftp { loc: loc.into(), auth: auth.clone() },
+		}
+	}
+}
+
+impl From<&Url<'_>> for UrlBuf {
+	fn from(url: &Url<'_>) -> Self { (*url).into() }
+}
+
+impl From<LocBuf> for UrlBuf {
+	fn from(loc: LocBuf) -> Self { Self::Regular(loc) }
+}
+
+impl From<PathBuf> for UrlBuf {
+	fn from(path: PathBuf) -> Self { LocBuf::from(path).into() }
 }
 
 impl From<&PathBuf> for UrlBuf {
@@ -53,6 +75,14 @@ impl TryFrom<String> for UrlBuf {
 	}
 }
 
+impl TryFrom<(Spec, PathBufDyn)> for UrlBuf {
+	type Error = anyhow::Error;
+
+	fn try_from(value: (Spec, PathBufDyn)) -> Result<Self, Self::Error> {
+		Ok(UrlCow::try_from(value)?.into_owned())
+	}
+}
+
 impl AsRef<Self> for UrlBuf {
 	fn as_ref(&self) -> &Self { self }
 }
@@ -70,6 +100,14 @@ impl From<Cow<'_, Self>> for UrlBuf {
 }
 
 // --- Eq
+impl PartialEq for UrlBuf {
+	fn eq(&self, other: &Self) -> bool { self.as_url() == other.as_url() }
+}
+
+impl PartialEq<UrlBuf> for &UrlBuf {
+	fn eq(&self, other: &UrlBuf) -> bool { self.as_url() == other.as_url() }
+}
+
 impl PartialEq<Url<'_>> for UrlBuf {
 	fn eq(&self, other: &Url) -> bool { self.as_url() == *other }
 }
@@ -78,173 +116,79 @@ impl PartialEq<Url<'_>> for &UrlBuf {
 	fn eq(&self, other: &Url) -> bool { self.as_url() == *other }
 }
 
+impl PartialEq<UrlCow<'_>> for UrlBuf {
+	fn eq(&self, other: &UrlCow) -> bool { self.as_url() == other.as_url() }
+}
+
+impl PartialEq<UrlCow<'_>> for &UrlBuf {
+	fn eq(&self, other: &UrlCow) -> bool { self.as_url() == other.as_url() }
+}
+
+// --- Hash
+impl Hash for UrlBuf {
+	fn hash<H: Hasher>(&self, state: &mut H) { self.as_url().hash(state) }
+}
+
 impl UrlBuf {
 	#[inline]
-	pub fn join(&self, path: impl AsRef<Path>) -> Self { self.as_url().join(path) }
-
-	#[inline]
-	pub fn components(&self) -> Components<'_> { Components::from(self) }
-
-	#[inline]
-	pub fn os_str(&self) -> Cow<'_, OsStr> { self.components().os_str() }
-
-	#[inline]
-	pub fn display(&self) -> Display<'_> { Display::new(self) }
-
-	#[inline]
-	pub fn covariant(&self, other: &Self) -> bool { self.as_url().covariant(other) }
-
-	#[inline]
-	pub fn parent(&self) -> Option<Url<'_>> { self.as_url().parent() }
-
-	#[inline]
-	pub fn starts_with<'a>(&self, base: impl Into<Url<'a>>) -> bool {
-		self.as_url().starts_with(base)
+	pub fn into_loc(self) -> PathBufDyn {
+		match self {
+			Self::Regular(loc) => loc.into_inner().into(),
+			Self::Search { loc, .. } => loc.into_inner().into(),
+			Self::Mount { loc, .. } => loc.into_inner().into(),
+			Self::Hub { loc, .. } => loc.into_inner().into(),
+			Self::Scope { loc, .. } => loc.into_inner().into(),
+			Self::Sftp { loc, .. } => loc.into_inner().into(),
+		}
 	}
 
-	#[inline]
-	pub fn ends_with<'a>(&self, child: impl Into<Url<'a>>) -> bool { self.as_url().ends_with(child) }
-
-	pub fn strip_prefix<'a>(&self, base: impl Into<Url<'a>>) -> Option<&Urn> {
-		use Scheme as S;
-		use SchemeRef as T;
-
-		let base = base.into();
-		let prefix = self.loc.strip_prefix(base.loc).ok()?;
-
-		Some(Urn::new(match (&self.scheme, base.scheme) {
-			// Same scheme
-			(S::Regular, T::Regular) => Some(prefix),
-			(S::Search(_), T::Search(_)) => Some(prefix),
-			(S::Archive(a), T::Archive(b)) => Some(prefix).filter(|_| a == b),
-			(S::Sftp(a), T::Sftp(b)) => Some(prefix).filter(|_| a == b),
-
-			// Both are local files
-			(S::Regular, T::Search(_)) => Some(prefix),
-			(S::Search(_), T::Regular) => Some(prefix),
-
-			// Only the entry of archives is a local file
-			(S::Regular, T::Archive(_)) => Some(prefix).filter(|_| base.uri().is_empty()),
-			(S::Search(_), T::Archive(_)) => Some(prefix).filter(|_| base.uri().is_empty()),
-			(S::Archive(_), T::Regular) => Some(prefix).filter(|_| self.uri().is_empty()),
-			(S::Archive(_), T::Search(_)) => Some(prefix).filter(|_| self.uri().is_empty()),
-
-			// Independent virtual file space
-			(S::Regular, T::Sftp(_)) => None,
-			(S::Search(_), T::Sftp(_)) => None,
-			(S::Archive(_), T::Sftp(_)) => None,
-			(S::Sftp(_), T::Regular) => None,
-			(S::Sftp(_), T::Search(_)) => None,
-			(S::Sftp(_), T::Archive(_)) => None,
-		}?))
+	pub fn try_set_name(&mut self, name: impl AsStrand) -> Result<(), SetNameError> {
+		let name = name.as_strand();
+		Ok(match self {
+			Self::Regular(loc) => loc.try_set_name(name.as_os()?)?,
+			Self::Search { loc, .. } => loc.try_set_name(name.as_os()?)?,
+			Self::Mount { loc, .. } => loc.try_set_name(name.as_os()?)?,
+			Self::Hub { loc, .. } => loc.try_set_name(name.as_os()?)?,
+			Self::Scope { loc, .. } => loc.try_set_name(name.encoded_bytes())?,
+			Self::Sftp { loc, .. } => loc.try_set_name(name.encoded_bytes())?,
+		})
 	}
 
-	#[inline]
-	pub fn as_path(&self) -> Option<&Path> { self.as_url().as_path() }
-
-	#[inline]
-	pub fn into_path(self) -> Option<PathBuf> {
-		Some(self.loc.into_path()).filter(|_| !self.scheme.is_virtual())
-	}
-
-	#[inline]
-	pub fn set_name(&mut self, name: impl AsRef<OsStr>) { self.loc.set_name(name); }
-
-	#[inline]
 	pub fn rebase(&self, base: &Path) -> Self {
-		Self { loc: self.loc.rebase(base), scheme: self.scheme.clone() }
+		match self {
+			Self::Regular(loc) => Self::Regular(loc.rebase(base)),
+			Self::Search { loc, auth } => Self::Search { loc: loc.rebase(base), auth: auth.clone() },
+			Self::Mount { loc, auth } => Self::Mount { loc: loc.rebase(base), auth: auth.clone() },
+			Self::Hub { .. } => todo!(),
+			Self::Scope { .. } => todo!(),
+			Self::Sftp { .. } => todo!(),
+		}
 	}
-
-	#[inline]
-	pub fn pair(&self) -> Option<(Url<'_>, &Urn)> { self.as_url().pair() }
-
-	#[inline]
-	pub fn hash_u64(&self) -> u64 { foldhash::fast::FixedState::default().hash_one(self) }
 }
 
 impl UrlBuf {
 	#[inline]
-	pub fn as_url(&self) -> Url<'_> { Url::from(self) }
+	pub fn to_regular(&self) -> Result<Self, PathDynError> { Ok(self.as_url().as_regular()?.into()) }
 
 	#[inline]
-	pub fn base(&self) -> Option<Url<'_>> { self.as_url().base() }
-}
+	pub(crate) fn into_search(self, query: impl AsRef<str>) -> Result<Self, PathDynError> {
+		Ok(Self::Search {
+			loc:  LocBuf::<PathBuf>::zeroed(self.into_loc().into_os()?),
+			auth: Auth::search(query.as_ref()),
+		})
+	}
 
-impl UrlBuf {
-	// --- Regular
-	#[inline]
-	pub fn is_regular(&self) -> bool { self.as_url().is_regular() }
-
-	#[inline]
-	pub fn to_regular(&self) -> Self { self.as_url().into_regular().into() }
-
-	#[inline]
-	pub fn into_regular(mut self) -> Self {
-		self.loc = self.loc.into_path().into();
-		self.scheme = Scheme::Regular;
+	pub(crate) fn into_domain<'a>(mut self, domain: impl Into<Domain<'a>>) -> Self {
+		match &mut self {
+			Self::Regular(_) => {}
+			Self::Search { auth, .. }
+			| Self::Mount { auth, .. }
+			| Self::Hub { auth, .. }
+			| Self::Scope { auth, .. }
+			| Self::Sftp { auth, .. } => Arc::make_mut(auth).domain = domain.into().into_owned(),
+		}
 		self
 	}
-
-	// --- Search
-	#[inline]
-	pub fn is_search(&self) -> bool { matches!(self.scheme, Scheme::Search(_)) }
-
-	#[inline]
-	pub fn to_search(&self, domain: impl AsRef<str>) -> Self {
-		Self {
-			loc:    LocBuf::zeroed(self.loc.to_path()),
-			scheme: Scheme::Search(Pool::<str>::intern(domain)),
-		}
-	}
-
-	#[inline]
-	pub fn into_search(mut self, domain: impl AsRef<str>) -> Self {
-		self.loc = LocBuf::zeroed(self.loc.into_path());
-		self.scheme = Scheme::Search(Pool::<str>::intern(domain));
-		self
-	}
-
-	// --- Archive
-	#[inline]
-	pub fn is_archive(&self) -> bool { matches!(self.scheme, Scheme::Archive(_)) }
-
-	// --- Internal
-	#[inline]
-	pub fn is_internal(&self) -> bool {
-		match self.scheme {
-			Scheme::Regular | Scheme::Sftp(_) => true,
-			Scheme::Search(_) => !self.loc.uri().is_empty(),
-			Scheme::Archive(_) => false,
-		}
-	}
-
-	// FIXME: remove
-	#[inline]
-	pub fn into_path2(self) -> PathBuf { self.loc.into_path() }
-
-	#[inline]
-	pub fn name(&self) -> Option<&OsStr> { self.as_url().name() }
-
-	#[inline]
-	pub fn stem(&self) -> Option<&OsStr> { self.as_url().stem() }
-
-	#[inline]
-	pub fn ext(&self) -> Option<&OsStr> { self.as_url().ext() }
-
-	#[inline]
-	pub fn uri(&self) -> &Uri { self.as_url().uri() }
-
-	#[inline]
-	pub fn urn(&self) -> &Urn { self.as_url().urn() }
-
-	#[inline]
-	pub fn is_absolute(&self) -> bool { self.as_url().is_absolute() }
-
-	#[inline]
-	pub fn has_root(&self) -> bool { self.as_url().has_root() }
-
-	#[inline]
-	pub fn has_trail(&self) -> bool { self.as_url().has_trail() }
 }
 
 impl Debug for UrlBuf {
@@ -253,12 +197,7 @@ impl Debug for UrlBuf {
 
 impl Serialize for UrlBuf {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		let Self { scheme, loc } = self;
-		match (scheme.is_virtual(), loc.to_str()) {
-			(false, Some(s)) => serializer.serialize_str(s),
-			(true, Some(s)) => serializer.serialize_str(&format!("{}{s}", Encode::from(self))),
-			(_, None) => serializer.collect_str(&EncodeTilded::from(self)),
-		}
+		self.as_url().serialize(serializer)
 	}
 }
 
@@ -267,17 +206,74 @@ impl<'de> Deserialize<'de> for UrlBuf {
 	where
 		D: serde::Deserializer<'de>,
 	{
-		let s = String::deserialize(deserializer)?;
-		Self::try_from(s).map_err(serde::de::Error::custom)
+		struct Visitor;
+
+		impl<'de> de::Visitor<'de> for Visitor {
+			type Value = UrlBuf;
+
+			fn expecting(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+				formatter.write_str("a Url or URL string")
+			}
+
+			fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+			where
+				E: de::Error,
+			{
+				UrlBuf::from_str(value).map_err(E::custom)
+			}
+
+			fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+			where
+				E: de::Error,
+			{
+				UrlBuf::try_from(value).map_err(E::custom)
+			}
+
+			fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+			where
+				D: de::Deserializer<'de>,
+			{
+				#[derive(Deserialize)]
+				struct Shadow {
+					#[serde(flatten)]
+					spec: Spec,
+					path: Vec<u8>,
+				}
+
+				let Shadow { spec, path } = Deserialize::deserialize(deserializer)?;
+				let path = PathBufDyn::with(spec.kind, path).map_err(de::Error::custom)?;
+
+				UrlBuf::try_from((spec, path)).map_err(de::Error::custom)
+			}
+		}
+
+		deserializer.deserialize_string(Visitor)
 	}
+}
+
+impl<'de> IntoDeserializer<'de, de::value::Error> for UrlBuf {
+	type Deserializer = UrlDeserializer<'de>;
+
+	fn into_deserializer(self) -> Self::Deserializer { UrlDeserializer(self.into()) }
+}
+
+impl<'de> IntoDeserializer<'de, de::value::Error> for &'de UrlBuf {
+	type Deserializer = UrlDeserializer<'de>;
+
+	fn into_deserializer(self) -> Self::Deserializer { UrlDeserializer(self.into()) }
 }
 
 // --- Tests
 #[cfg(test)]
 mod tests {
+	use std::fmt::Debug;
+
 	use anyhow::Result;
 
 	use super::*;
+	use crate::{path::PathKind, url::UrlLike};
+
+	fn debug(value: impl Debug) -> String { format!("{value:?}").replace(r"\", "/") }
 
 	#[test]
 	fn test_join() -> anyhow::Result<()> {
@@ -288,13 +284,13 @@ mod tests {
 			// Search
 			("search://kw//a", "b/c", "search://kw:2:2//a/b/c"),
 			("search://kw:2:2//a/b/c", "d/e", "search://kw:4:4//a/b/c/d/e"),
-			// Archive
-			("archive:////a/b.zip", "c/d", "archive://:2:1//a/b.zip/c/d"),
-			("archive://:2:1//a/b.zip/c/d", "e/f", "archive://:4:1//a/b.zip/c/d/e/f"),
-			("archive://:2:2//a/b.zip/c/d", "e/f", "archive://:4:1//a/b.zip/c/d/e/f"),
+			// Mount
+			("test-mount://7z//a/b.zip", "c/d", "test-mount://7z:2:1//a/b.zip/c/d"),
+			("test-mount://7z:2:1//a/b.zip/c/d", "e/f", "test-mount://7z:4:1//a/b.zip/c/d/e/f"),
+			("test-mount://7z:2:2//a/b.zip/c/d", "e/f", "test-mount://7z:4:1//a/b.zip/c/d/e/f"),
 			// SFTP
-			("sftp://remote//a", "b/c", "sftp://remote//a/b/c"),
-			("sftp://remote:1:1//a/b/c", "d/e", "sftp://remote//a/b/c/d/e"),
+			("sftp://vps//a", "b/c", "sftp://vps//a/b/c"),
+			("sftp://vps:1:1//a/b/c", "d/e", "sftp://vps//a/b/c/d/e"),
 			// Relative
 			("search://kw", "b/c", "search://kw:2:2/b/c"),
 			("search://kw/", "b/c", "search://kw:2:2/b/c"),
@@ -302,10 +298,7 @@ mod tests {
 
 		for (base, path, expected) in cases {
 			let base: UrlBuf = base.parse()?;
-			#[cfg(unix)]
-			assert_eq!(format!("{:?}", base.join(path)), expected);
-			#[cfg(windows)]
-			assert_eq!(format!("{:?}", base.join(path)).replace(r"\", "/"), expected.replace(r"\", "/"));
+			assert_eq!(debug(base.try_join(path)?), expected);
 		}
 
 		Ok(())
@@ -318,28 +311,35 @@ mod tests {
 			// Regular
 			("/a", Some("/")),
 			("/", None),
+			("a", Some("")),
+			("", None),
 			// Search
 			("search://kw:2:2//a/b/c", Some("search://kw:1:1//a/b")),
 			("search://kw:1:1//a/b", Some("search://kw//a")),
 			("search://kw//a", Some("/")),
-			// Archive
-			("archive://:2:1//a/b.zip/c/d", Some("archive://:1:1//a/b.zip/c")),
-			("archive://:1:1//a/b.zip/c", Some("archive:////a/b.zip")),
-			("archive:////a/b.zip", Some("/a")),
+			// Mount
+			("test-mount://7z:2:1//a/b.zip/c/d", Some("test-mount://7z:1:1//a/b.zip/c")),
+			("test-mount://7z:1:1//a/b.zip/c", Some("test-mount://7z//a/b.zip")),
+			("test-mount://7z//a/b.zip", Some("/a")),
 			// SFTP
-			("sftp://remote:1:1//a/b", Some("sftp://remote//a")),
-			("sftp://remote:1:1//a", Some("sftp://remote//")),
-			("sftp://remote:1//", None),
-			("sftp://remote//", None),
+			("sftp://vps:3:1//a/b", Some("sftp://vps//a")),
+			("sftp://vps:2:1//a", Some("sftp://vps//")),
+			("sftp://vps:1:1//a", Some("sftp://vps//")),
+			("sftp://vps//a", Some("sftp://vps//")),
+			("sftp://vps:1//", None),
+			("sftp://vps//", None),
 			// Relative
 			("search://kw:2:2/a/b", Some("search://kw:1:1/a")),
 			("search://kw:1:1/a", Some("search://kw/")),
 			("search://kw/", None),
+			("test-mount://7z:1:1/a", Some("test-mount://7z/")),
+			("test-scope://aws/a", Some("test-scope://aws/")),
+			("sftp://vps/a", Some("sftp://vps/")),
 		];
 
 		for (path, expected) in cases {
 			let path: UrlBuf = path.parse()?;
-			assert_eq!(path.parent().map(|u| format!("{u:?}")).as_deref(), expected);
+			assert_eq!(path.parent().map(debug).as_deref(), expected);
 		}
 
 		Ok(())
@@ -348,29 +348,181 @@ mod tests {
 	#[test]
 	fn test_into_search() -> Result<()> {
 		crate::init_tests();
-		const S: char = std::path::MAIN_SEPARATOR;
 
 		let u: UrlBuf = "/root".parse()?;
-		assert_eq!(format!("{u:?}"), "/root");
+		assert_eq!(debug(&u), "/root");
 
-		let u = u.into_search("kw");
-		assert_eq!(format!("{u:?}"), "search://kw//root");
-		assert_eq!(format!("{:?}", u.parent().unwrap()), "/");
+		let u = u.into_search("kw")?;
+		assert_eq!(debug(&u), "search://kw//root");
+		assert_eq!(debug(u.parent().unwrap()), "/");
 
-		let u = u.join("examples");
-		assert_eq!(format!("{u:?}"), format!("search://kw:1:1//root{S}examples"));
+		let u = u.try_join("examples")?;
+		assert_eq!(debug(&u), "search://kw:1:1//root/examples");
 
-		let u = u.join("README.md");
-		assert_eq!(format!("{u:?}"), format!("search://kw:2:2//root{S}examples{S}README.md"));
-
-		let u = u.parent().unwrap();
-		assert_eq!(format!("{u:?}"), format!("search://kw:1:1//root{S}examples"));
+		let u = u.try_join("README.md")?;
+		assert_eq!(debug(&u), "search://kw:2:2//root/examples/README.md");
 
 		let u = u.parent().unwrap();
-		assert_eq!(format!("{u:?}"), "search://kw//root");
+		assert_eq!(debug(u), "search://kw:1:1//root/examples");
 
 		let u = u.parent().unwrap();
-		assert_eq!(format!("{u:?}"), "/");
+		assert_eq!(debug(u), "search://kw//root");
+
+		let u = u.parent().unwrap();
+		assert_eq!(debug(u), "/");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_hub_parse() -> Result<()> {
+		crate::init_tests();
+
+		let root: UrlBuf = "test-hub://root/@/".parse()?;
+		assert_eq!(debug(&root), "test-hub://root/@/");
+		assert_eq!(root.loc().kind(), PathKind::Os);
+
+		let encoded: UrlBuf = "test-hub://%252C/@/".parse()?;
+		assert_eq!(debug(encoded), "test-hub://%252C/@/");
+		let encoded: UrlBuf = "test-hub://b1/@a%2Cb%40c%25d%2Fe,root/foo/bar".parse()?;
+		assert_eq!(debug(encoded), "test-hub://b1/@a%2Cb%40c%25d%2Fe,root/foo/bar");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_hub_domain() -> Result<()> {
+		crate::init_tests();
+
+		let root: UrlBuf = "test-hub://root/@/".parse()?;
+		let foo = root.try_join("foo")?.into_domain("a1");
+		assert_eq!(debug(&foo), "test-hub://a1/@root/foo");
+
+		let bar = foo.try_join("bar")?.into_domain("b1");
+		assert_eq!(bar.key(), "b1");
+		assert_eq!(debug(&bar), "test-hub://b1/@a1,root/foo/bar");
+		assert_eq!(debug(bar.parent().unwrap()), "test-hub://a1/@root/foo");
+		assert_eq!(debug(bar.parent().unwrap().parent().unwrap()), "test-hub://root/@/");
+
+		let relative = UrlCow::try_from("test-hub://a1/@/@abc")?;
+		assert_eq!(debug(relative.as_url()), "test-hub://a1/@/@abc");
+		assert_eq!(debug(relative.parent().unwrap().as_url()), "test-hub:///@/");
+		assert_eq!(relative.key(), "a1");
+		assert!(!relative.is_owned());
+		assert!(relative.parent().unwrap().key().is_empty());
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_hub_join() -> Result<()> {
+		crate::init_tests();
+
+		let root: UrlBuf = "test-hub://root/@/".parse()?;
+		let bar: UrlBuf = "test-hub://b1/@a1,root/foo/bar".parse()?;
+
+		assert_eq!(debug(bar.try_join(".")?), "test-hub://b1/@a1,root/foo/bar");
+		assert_eq!(debug(bar.try_join("..")?), "test-hub:///@b1,a1,root/foo/bar/..");
+
+		assert_eq!(debug(bar.try_join("/x/y")?), "test-hub:///@,//x/y");
+		assert_eq!(debug(root.try_join("../../..")?), "test-hub:///@,,root/../../..");
+
+		let absolute = root.try_join("/foo")?;
+		assert_eq!(debug(&absolute), "test-hub:///@//foo");
+		let absolute = absolute.into_domain("a1");
+		assert_eq!(debug(&absolute), "test-hub://a1/@//foo");
+		assert_eq!(debug(absolute.parent().unwrap().try_join("..")?), "test-hub:///@//..");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_hub_ports() -> Result<()> {
+		crate::init_tests();
+
+		let ports: UrlBuf = "test-hub://b1:2:1/@a1,root/foo/bar".parse()?;
+		assert_eq!(debug(ports.base()), "test-hub://root/@/");
+		assert_eq!(debug(ports.trail()), "test-hub://a1/@root/foo");
+
+		let ports: UrlBuf = "test-hub://b1:3:1/@a1,root//foo/bar".parse()?;
+		assert_eq!(debug(ports.base()), "test-hub://root/@/");
+		assert_eq!(debug(ports.trail()), "test-hub://a1/@root//foo");
+
+		let zeroed: UrlBuf = "test-hub://b1:0:0/@a1,root/foo/bar".parse()?;
+		assert_eq!(debug(zeroed.base()), "test-hub://b1/@a1,root/foo/bar");
+		assert_eq!(debug(zeroed.trail()), "test-hub://b1/@a1,root/foo/bar");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_hub_invalid() {
+		crate::init_tests();
+
+		assert!("test-hub://a1/foo".parse::<UrlBuf>().is_err());
+		assert!("test-hub://b1/@a1/foo/bar".parse::<UrlBuf>().is_err());
+	}
+
+	#[test]
+	fn test_hub_replace() -> Result<()> {
+		crate::init_tests();
+
+		let url: UrlBuf = "test-hub://b1/@a1,root/foo/bar".parse()?;
+		assert_eq!(
+			debug(url.try_replace(2, Path::new("baz/qux"))?.as_url()),
+			"test-hub://b1:2:2/@,a1,root/foo/baz/qux"
+		);
+		assert_eq!(debug(url.try_replace(1, Path::new("qux"))?.as_url()), "test-hub://b1/@root/qux");
+
+		Ok(())
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn test_hub_windows() -> Result<()> {
+		crate::init_tests();
+
+		let root: UrlBuf = "test-hub://root/@/".parse()?;
+		let c = root.try_join(r"C:\")?.into_domain("c-root");
+		assert_eq!(c.key(), "c-root");
+		assert_eq!(c.auth().parent_depth(), 0);
+
+		let drive = c.try_join(r"Users\file.txt")?.into_domain("file");
+		assert_eq!(drive.loc(), Path::new(r"C:\Users\file.txt"));
+		assert_eq!(drive.auth().parent_depth(), 2);
+
+		let parent = drive.parent().unwrap();
+		assert_eq!(parent.loc(), Path::new(r"C:\Users"));
+
+		let parent = parent.parent().unwrap();
+		assert_eq!(parent.loc(), Path::new(r"C:\"));
+		assert_eq!(parent.key(), "c-root");
+		assert!(parent.parent().is_none());
+
+		let relative = root.try_join(r"C:foo")?;
+		assert!(!relative.is_absolute());
+		assert_eq!(relative.parent().unwrap().loc(), Path::new("C:"));
+		assert!(relative.parent().unwrap().parent().is_none());
+
+		let unc = root.try_join(r"\\server\share\dir\file")?;
+		assert!(unc.is_absolute());
+		assert_eq!(unc.loc(), Path::new(r"\\server\share\dir\file"));
+		assert_eq!(unc.auth().parent_depth(), 2);
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_regular_root_key() -> Result<()> {
+		crate::init_tests();
+
+		let root: UrlBuf = "/".parse()?;
+		assert!(root.key().is_empty());
+		assert!(root.pair().is_none());
+
+		let child: UrlBuf = "/foo".parse()?;
+		assert_eq!(child.key(), "foo");
+		assert!(!child.key().has_root());
 
 		Ok(())
 	}

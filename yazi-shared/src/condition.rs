@@ -1,7 +1,7 @@
-use std::str::FromStr;
+use std::{cmp::Ordering, str::FromStr};
 
 use anyhow::bail;
-use serde::{Deserialize, Deserializer, de};
+use serde_with::DeserializeFromStr;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConditionOp {
@@ -20,7 +20,7 @@ pub enum ConditionOp {
 }
 
 impl ConditionOp {
-	pub fn new(c: char) -> Self {
+	fn new(c: char) -> Self {
 		match c {
 			'|' => Self::Or,
 			'&' => Self::And,
@@ -33,8 +33,7 @@ impl ConditionOp {
 		}
 	}
 
-	#[inline]
-	pub fn prec(&self) -> u8 {
+	fn prec(&self) -> u8 {
 		match self {
 			Self::Or => 1,
 			Self::And => 2,
@@ -44,7 +43,19 @@ impl ConditionOp {
 	}
 }
 
-#[derive(Debug)]
+impl PartialOrd for ConditionOp {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		use Ordering::*;
+
+		match self.prec().cmp(&other.prec()) {
+			// Keep repeated `!` right-associative by making `! >= !` false.
+			Equal if matches!((self, other), (Self::Not, Self::Not)) => None,
+			ordering => Some(ordering),
+		}
+	}
+}
+
+#[derive(Debug, DeserializeFromStr)]
 pub struct Condition {
 	ops: Vec<ConditionOp>,
 }
@@ -62,16 +73,6 @@ impl FromStr for Condition {
 	}
 }
 
-impl<'de> Deserialize<'de> for Condition {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		let s = String::deserialize(deserializer)?;
-		FromStr::from_str(&s).map_err(de::Error::custom)
-	}
-}
-
 impl Condition {
 	fn build(expr: &str) -> Self {
 		let mut stack: Vec<ConditionOp> = vec![];
@@ -82,7 +83,7 @@ impl Condition {
 			let op = ConditionOp::new(token);
 			match op {
 				ConditionOp::Or | ConditionOp::And | ConditionOp::Not => {
-					while matches!(stack.last(), Some(last) if last.prec() >= op.prec()) {
+					while matches!(stack.last(), Some(last) if last >= &op) {
 						output.push(stack.pop().unwrap());
 					}
 					stack.push(op);
@@ -137,5 +138,23 @@ impl Condition {
 		}
 
 		if stack.len() == 1 { Some(stack[0]) } else { None }
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_condition_not() -> anyhow::Result<()> {
+		let cond: Condition = "!dir".parse()?;
+		assert!(!cond.eval(|s| s == "dir").unwrap());
+		assert!(cond.eval(|_| false).unwrap());
+
+		let cond: Condition = "!!dir".parse()?;
+		assert!(cond.eval(|s| s == "dir").unwrap());
+		assert!(!cond.eval(|_| false).unwrap());
+
+		Ok(())
 	}
 }

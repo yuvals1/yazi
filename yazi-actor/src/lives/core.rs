@@ -1,9 +1,11 @@
 use std::ops::Deref;
 
-use mlua::{AnyUserData, IntoLua, MetaMethod, UserData, Value};
+use mlua::{AnyUserData, IntoLua, LuaString, MetaMethod, UserData, UserDataMethods, UserDataRef, Value};
 use paste::paste;
 
 use super::{Lives, PtrCell};
+
+pub(super) type CoreRef = UserDataRef<Core>;
 
 pub(super) struct Core {
 	inner: PtrCell<yazi_core::Core>,
@@ -12,6 +14,8 @@ pub(super) struct Core {
 	c_tabs:   Option<Value>,
 	c_tasks:  Option<Value>,
 	c_yanked: Option<Value>,
+	c_input:  Option<Value>,
+	c_which:  Option<Value>,
 	c_layer:  Option<Value>,
 }
 
@@ -30,14 +34,16 @@ impl Core {
 			c_tabs:   None,
 			c_tasks:  None,
 			c_yanked: None,
+			c_input:  None,
+			c_which:  None,
 			c_layer:  None,
 		})
 	}
 }
 
 impl UserData for Core {
-	fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-		methods.add_meta_method_mut(MetaMethod::Index, |lua, me, key: mlua::String| {
+	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+		methods.add_meta_method_mut(MetaMethod::Index, |lua, me, key: LuaString| {
 			macro_rules! reuse {
 				($key:ident, $value:expr) => {
 					match paste! { &me.[<c_ $key>] } {
@@ -50,14 +56,14 @@ impl UserData for Core {
 					}
 				};
 			}
-			Ok(match key.as_bytes().as_ref() {
+			Ok(match &*key.as_bytes() {
 				b"active" => reuse!(active, super::Tab::make(me.active())),
 				b"tabs" => reuse!(tabs, super::Tabs::make(&me.mgr.tabs)),
 				b"tasks" => reuse!(tasks, super::Tasks::make(&me.tasks)),
 				b"yanked" => reuse!(yanked, super::Yanked::make(&me.mgr.yanked)),
-				b"layer" => {
-					reuse!(layer, Ok::<_, mlua::Error>(yazi_plugin::bindings::Layer::from(me.layer())))
-				}
+				b"input" => reuse!(input, super::Input::make(&me.input)),
+				b"which" => reuse!(which, super::Which::make(&me.which)),
+				b"layer" => reuse!(layer, Ok::<_, mlua::Error>(me.layer())),
 				_ => Value::Nil,
 			})
 		});

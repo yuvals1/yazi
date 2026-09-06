@@ -1,313 +1,493 @@
-use std::{borrow::Cow, collections::VecDeque};
+use std::mem;
 
-use anyhow::{Result, anyhow};
-use tokio::{io::{self, ErrorKind::{AlreadyExists, NotFound}}, sync::mpsc};
-use tracing::warn;
+use anyhow::{Context, Result, anyhow};
+use tokio::{io::{self, ErrorKind::NotFound}, sync::mpsc};
 use yazi_config::YAZI;
-use yazi_fs::{cha::Cha, copy_with_progress, maybe_exists, ok_or_not_found, path::{path_relative_to, skip_url}, provider::{self, DirEntry}};
-use yazi_shared::url::{Url, UrlBuf, UrlCow};
+use yazi_fs::{Cwd, FsHash128, FsUrl, cha::Cha, engine::{Attrs, Engine, FileHolder, local::Local}, ok_or_not_found, path::path_relative_to};
+use yazi_macro::warn;
+use yazi_shared::{path::{PathCow, PathLike}, url::{AsUrl, UrlCow, UrlLike}};
+use yazi_vfs::{Stamp, VfsCha, engine::{self, DirEntry}, maybe_exists, unique_file};
 
-use super::{FileInDelete, FileInHardlink, FileInLink, FileInPaste, FileInTrash};
-use crate::{LOW, NORMAL, TaskIn, TaskOp, TaskOps, file::{FileOutDelete, FileOutDeleteDo, FileOutHardlink, FileOutHardlinkDo, FileOutLink, FileOutPaste, FileOutPasteDo, FileOutTrash}};
+use super::{FileInCopy, FileInDelete, FileInHardlink, FileInLink, FileInTrash};
+use crate::{LOW, NORMAL, TaskOp, TaskOps, TasksProxy, ctx, file::{FileIn, FileInDownload, FileInMove, FileInUpload, FileOutCopy, FileOutCopyDo, FileOutDelete, FileOutDeleteDo, FileOutDownload, FileOutDownloadDo, FileOutHardlink, FileOutHardlinkDo, FileOutLink, FileOutMove, FileOutMoveDo, FileOutTrash, FileOutUpload, FileOutUploadDo, Transaction, Traverse}, hook::{HookInOutCopy, HookInOutHardlink, HookInOutLink, HookInOutMove}, ok_or_not_found};
 
 pub(crate) struct File {
-	ops:     TaskOps,
-	r#macro: async_priority_channel::Sender<TaskIn, u8>,
+	ops: TaskOps,
+	tx:  async_priority_channel::Sender<FileIn, u8>,
 }
 
 impl File {
 	pub(crate) fn new(
-		tx: &mpsc::UnboundedSender<TaskOp>,
-		r#macro: &async_priority_channel::Sender<TaskIn, u8>,
+		ops: &mpsc::UnboundedSender<TaskOp>,
+		tx: async_priority_channel::Sender<FileIn, u8>,
 	) -> Self {
-		Self { ops: tx.into(), r#macro: r#macro.clone() }
+		Self { ops: ops.into(), tx }
 	}
 
-	pub(crate) async fn paste(&self, mut task: FileInPaste) -> Result<(), FileOutPaste> {
-		if task.cut && ok_or_not_found(provider::rename(&task.from, &task.to).await).is_ok() {
-			return Ok(self.ops.out(task.id, FileOutPaste::Init));
+	pub(crate) async fn copy(&self, mut task: FileInCopy) -> Result<(), FileOutCopy> {
+		let id = task.id;
+
+		if !task.force {
+			task.to = unique_file(mem::take(&mut task.to), task.init().await?.is_dir())
+				.await
+				.context("Cannot determine unique destination name")?;
 		}
 
-		if task.cha.is_none() {
-			task.cha = Some(Self::cha(&task.from, task.follow).await?);
-		}
+		self.ops.out(id, HookInOutCopy::new(&task.from, &task.to));
+		TasksProxy::update_succeed(id, [&task.to], true);
 
-		let cha = task.cha.unwrap();
-		if !cha.is_dir() {
-			let id = task.id;
-			if cha.is_orphan() || (cha.is_link() && !task.follow) {
-				self.ops.out(id, FileOutPaste::New(0));
-				self.queue(task.into_link(), NORMAL);
-			} else {
-				self.ops.out(id, FileOutPaste::New(cha.len));
-				self.queue(task, LOW);
-			}
-			return Ok(self.ops.out(id, FileOutPaste::Init));
-		}
-
-		macro_rules! continue_unless_ok {
-			($result:expr) => {
-				match $result {
-					Ok(v) => v,
-					Err(e) => {
-						self.ops.out(task.id, FileOutPaste::Deform(e.to_string()));
-						continue;
-					}
-				}
-			};
-		}
-
-		let root = &task.to;
-		let skip = task.from.components().count();
-		let mut dirs = VecDeque::from([task.from.clone()]);
-
-		while let Some(src) = dirs.pop_front() {
-			let dest = root.join(skip_url(&src, skip));
-			continue_unless_ok!(match provider::create_dir(&dest).await {
-				Err(e) if e.kind() != AlreadyExists => Err(e),
+		super::traverse::<FileOutCopy, _, _, _, _, _>(
+			task,
+			async |dir| match engine::create_dir(dir).await {
+				Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e)?,
 				_ => Ok(()),
-			});
-
-			let mut it = continue_unless_ok!(provider::read_dir(&src).await);
-			while let Ok(Some(entry)) = it.next_entry().await {
-				let from = entry.url();
-				let cha = continue_unless_ok!(Self::cha_from(entry, &from, task.follow).await);
-
-				if cha.is_dir() {
-					dirs.push_back(from);
-					continue;
-				}
-
-				let to = dest.join(from.name().unwrap());
-				if cha.is_orphan() || (cha.is_link() && !task.follow) {
-					self.ops.out(task.id, FileOutPaste::New(0));
-					self.queue(task.spawn(from, to, cha).into_link(), NORMAL);
+			},
+			async |task, cha| {
+				Ok(if cha.is_orphan() || (cha.is_indirect() && !task.follow) {
+					self.ops.out(id, FileOutCopy::New(0));
+					self.requeue(task.into_link(), NORMAL);
 				} else {
-					self.ops.out(task.id, FileOutPaste::New(cha.len));
-					self.queue(task.spawn(from, to, cha), LOW);
-				}
-			}
-		}
+					self.ops.out(id, FileOutCopy::New(cha.len));
+					self.requeue(task, LOW);
+				})
+			},
+			|err| {
+				self.ops.out(id, FileOutCopy::Deform(err));
+			},
+		)
+		.await?;
 
-		Ok(self.ops.out(task.id, FileOutPaste::Init))
+		Ok(self.ops.out(id, FileOutCopy::Succ))
 	}
 
-	pub(crate) async fn paste_do(&self, mut task: FileInPaste) -> Result<(), FileOutPasteDo> {
-		ok_or_not_found(provider::remove_file(&task.to).await)?;
-		let mut it = copy_with_progress(&task.from, &task.to, task.cha.unwrap());
+	pub(crate) async fn copy_do(&self, mut task: FileInCopy) -> Result<(), FileOutCopyDo> {
+		ok_or_not_found!(task, Transaction::unlink(&task.to).await);
+		let mut rx =
+			ctx!(task, engine::copy_progressive(&task.from, &task.to, task.cha.unwrap()).await)?;
 
-		while let Some(res) = it.recv().await {
-			match res {
-				Ok(0) => {
-					if task.cut {
-						provider::remove_file(&task.from).await.ok();
-					}
-					break;
-				}
-				Ok(n) => self.ops.out(task.id, FileOutPasteDo::Adv(n)),
+		loop {
+			match rx.recv().await.unwrap_or(Ok(0)) {
+				Ok(0) => break,
+				Ok(n) => self.ops.out(task.id, FileOutCopyDo::Adv(n)),
 				Err(e) if e.kind() == NotFound => {
-					warn!("Paste task partially done: {task:?}");
+					warn!("Copy task partially done: {task:?}");
 					break;
 				}
 				// Operation not permitted (os error 1)
 				// Attribute not found (os error 93)
 				Err(e)
-					if task.retry < YAZI.tasks.bizarre_retry
+					if task.retry < YAZI.tasks.bizarre_retry.get()
 						&& matches!(e.raw_os_error(), Some(1) | Some(93)) =>
 				{
 					task.retry += 1;
-					self.ops.out(task.id, FileOutPasteDo::Log(format!("Retrying due to error: {e}")));
-					return Ok(self.queue(task, LOW));
+					self.ops.out(task.id, FileOutCopyDo::Log(format!("Retrying due to error: {e}")));
+					return Ok(self.requeue(task, LOW));
 				}
-				Err(e) => Err(e)?,
+				Err(e) => ctx!(task, Err(e))?,
 			}
 		}
-		Ok(self.ops.out(task.id, FileOutPasteDo::Succ))
+		Ok(self.ops.out(task.id, FileOutCopyDo::Succ))
 	}
 
-	pub(crate) fn link(&self, task: FileInLink) -> Result<(), FileOutLink> {
-		Ok(self.queue(task, NORMAL))
+	pub(crate) async fn r#move(&self, mut task: FileInMove) -> Result<(), FileOutMove> {
+		let id = task.id;
+
+		if !task.force {
+			task.to = unique_file(mem::take(&mut task.to), task.init().await?.is_dir())
+				.await
+				.context("Cannot determine unique destination name")?;
+		}
+
+		self.ops.out(id, HookInOutMove::new(&task.from, &task.to));
+		TasksProxy::update_succeed(id, [&task.to], true);
+
+		if !task.follow && ok_or_not_found(engine::rename(&task.from, &task.to).await).is_ok() {
+			return Ok(self.ops.out(id, FileOutMove::Succ));
+		}
+
+		let (mut links, mut files) = (vec![], vec![]);
+		let reorder = task.follow && ctx!(task, engine::capabilities(&task.from).await)?.symlink;
+
+		super::traverse::<FileOutMove, _, _, _, _, _>(
+			task,
+			async |dir| match engine::create_dir(dir).await {
+				Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e)?,
+				_ => Ok(()),
+			},
+			|task, cha| {
+				let nofollow = cha.is_orphan() || (cha.is_indirect() && !task.follow);
+				self.ops.out(id, FileOutMove::New(if nofollow { 0 } else { cha.len }));
+
+				if nofollow {
+					self.requeue(task.into_link(), NORMAL);
+				} else {
+					match (cha.is_link(), reorder) {
+						(_, false) => self.requeue(task, LOW),
+						(true, true) => links.push(task),
+						(false, true) => files.push(task),
+					}
+				};
+
+				async { Ok(()) }
+			},
+			|err| {
+				self.ops.out(id, FileOutMove::Deform(err));
+			},
+		)
+		.await?;
+
+		if !links.is_empty() {
+			let (tx, mut rx) = mpsc::channel(1);
+			for task in links {
+				self.requeue(task.with_drop(&tx), LOW);
+			}
+			drop(tx);
+			while rx.recv().await.is_some() {}
+		}
+
+		for task in files {
+			self.requeue(task, LOW);
+		}
+
+		Ok(self.ops.out(id, FileOutMove::Succ))
+	}
+
+	pub(crate) async fn move_do(&self, mut task: FileInMove) -> Result<(), FileOutMoveDo> {
+		ok_or_not_found!(task, Transaction::unlink(&task.to).await);
+		let mut rx =
+			ctx!(task, engine::copy_progressive(&task.from, &task.to, task.cha.unwrap()).await)?;
+
+		loop {
+			match rx.recv().await.unwrap_or(Ok(0)) {
+				Ok(0) => {
+					engine::remove_file(&task.from).await.ok();
+					break;
+				}
+				Ok(n) => self.ops.out(task.id, FileOutMoveDo::Adv(n)),
+				Err(e) if e.kind() == NotFound => {
+					warn!("Move task partially done: {task:?}");
+					break;
+				}
+				// Operation not permitted (os error 1)
+				// Attribute not found (os error 93)
+				Err(e)
+					if task.retry < YAZI.tasks.bizarre_retry.get()
+						&& matches!(e.raw_os_error(), Some(1) | Some(93)) =>
+				{
+					task.retry += 1;
+					self.ops.out(task.id, FileOutMoveDo::Log(format!("Retrying due to error: {e}")));
+					return Ok(self.requeue(task, LOW));
+				}
+				Err(e) => ctx!(task, Err(e))?,
+			}
+		}
+		Ok(self.ops.out(task.id, FileOutMoveDo::Succ))
+	}
+
+	pub(crate) async fn link(&self, mut task: FileInLink) -> Result<(), FileOutLink> {
+		if !task.force {
+			task.to =
+				unique_file(task.to, false).await.context("Cannot determine unique destination name")?;
+		}
+
+		self.ops.out(task.id, HookInOutLink::new(&task.from, &task.to));
+		self.requeue(task, NORMAL);
+		Ok(())
 	}
 
 	pub(crate) async fn link_do(&self, task: FileInLink) -> Result<(), FileOutLink> {
-		let src: Cow<_> = if task.resolve {
-			match provider::read_link(&task.from).await {
-				Ok(p) => p.into(),
-				Err(e) if e.kind() == NotFound => {
-					return Ok(self.ops.out(task.id, FileOutLink::Succ));
-				}
-				Err(e) => Err(e)?,
+		let mut cha = task.cha;
+		if cha.is_none() && (task.follow || task.delete) {
+			cha = Some(ctx!(task, Self::cha(&task.from, task.follow, None).await)?);
+		}
+
+		let mut src: PathCow = task.from.loc().into();
+		if task.follow && cha.unwrap().is_link() {
+			match engine::read_link(&task.from).await {
+				Ok(p) if p.is_absolute() => src = p.into(),
+				Ok(p) => src = ctx!(task, task.from.loc().parent().unwrap().try_join(p))?.into(),
+				Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+				Err(e) => ctx!(task, Err(e))?,
 			}
-		} else if task.from.scheme.covariant(&task.to.scheme) {
-			task.from.loc.as_path().into()
-		} else {
-			Err(anyhow!("Source and target must be on the same filesystem: {task:?}"))?
-		};
+		}
 
-		let src = if task.relative {
-			path_relative_to(provider::canonicalize(task.to.parent().unwrap()).await?.loc, &src)?
-		} else {
-			src
-		};
+		if task.relative {
+			let canon = ctx!(task, engine::canonicalize(task.to.parent().unwrap()).await)?;
+			src = ctx!(task, path_relative_to(canon.loc(), src))?;
+		}
 
-		ok_or_not_found(provider::remove_file(&task.to).await)?;
-		provider::symlink(&src, &task.to, async || {
-			Ok(match task.cha {
-				Some(cha) => cha.is_dir(),
-				None => Self::cha(&task.from, task.resolve).await?.is_dir(),
+		ok_or_not_found!(task, engine::remove_file(&task.to).await);
+		ctx!(
+			task,
+			engine::symlink(&task.to, src, async || {
+				Ok(match cha {
+					Some(cha) => cha.is_dir(),
+					None => {
+						cha = Some(Self::cha(&task.from, task.follow, None).await?);
+						cha.unwrap().is_dir()
+					}
+				})
 			})
-		})
-		.await?;
+			.await
+		)?;
 
 		if task.delete {
-			provider::remove_file(&task.from).await.ok();
+			let cha = cha.unwrap();
+			if cha.is_dir() && cha.is_indirect() {
+				engine::remove_dir(&task.from).await.ok();
+			} else {
+				engine::remove_file(&task.from).await.ok();
+			}
 		}
+
 		Ok(self.ops.out(task.id, FileOutLink::Succ))
 	}
 
 	pub(crate) async fn hardlink(&self, mut task: FileInHardlink) -> Result<(), FileOutHardlink> {
-		if task.cha.is_none() {
-			task.cha = Some(Self::cha(&task.from, task.follow).await?);
+		let id = task.id;
+
+		if !task.force {
+			task.to =
+				unique_file(task.to, false).await.context("Cannot determine unique destination name")?;
 		}
 
-		let cha = task.cha.unwrap();
-		if !cha.is_dir() {
-			let id = task.id;
-			self.ops.out(id, FileOutHardlink::New);
-			self.queue(task, NORMAL);
-			self.ops.out(id, FileOutHardlink::Init);
-			return Ok(());
-		}
-
-		macro_rules! continue_unless_ok {
-			($result:expr) => {
-				match $result {
-					Ok(v) => v,
-					Err(e) => {
-						self.ops.out(task.id, FileOutHardlink::Deform(e.to_string()));
-						continue;
-					}
-				}
-			};
-		}
-
-		let root = &task.to;
-		let skip = task.from.components().count();
-		let mut dirs = VecDeque::from([task.from.clone()]);
-
-		while let Some(src) = dirs.pop_front() {
-			let dest = root.join(skip_url(&src, skip));
-			continue_unless_ok!(match provider::create_dir(&dest).await {
-				Err(e) if e.kind() != AlreadyExists => Err(e),
+		self.ops.out(task.id, HookInOutHardlink::new(&task.from, &task.to));
+		super::traverse::<FileOutHardlink, _, _, _, _, _>(
+			task,
+			async |dir| match engine::create_dir(dir).await {
+				Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e)?,
 				_ => Ok(()),
-			});
+			},
+			async |task, _cha| {
+				self.ops.out(id, FileOutHardlink::New);
+				Ok(self.requeue(task, NORMAL))
+			},
+			|err| {
+				self.ops.out(id, FileOutHardlink::Deform(err));
+			},
+		)
+		.await?;
 
-			let mut it = continue_unless_ok!(provider::read_dir(&src).await);
-			while let Ok(Some(entry)) = it.next_entry().await {
-				let from = entry.url();
-				let cha = continue_unless_ok!(Self::cha_from(entry, &from, task.follow).await);
-
-				if cha.is_dir() {
-					dirs.push_back(from);
-					continue;
-				}
-
-				let to = dest.join(from.name().unwrap());
-				self.ops.out(task.id, FileOutHardlink::New);
-				self.queue(task.spawn(from, to, cha), NORMAL);
-			}
-		}
-
-		Ok(self.ops.out(task.id, FileOutHardlink::Init))
+		Ok(self.ops.out(id, FileOutHardlink::Succ))
 	}
 
 	pub(crate) async fn hardlink_do(&self, task: FileInHardlink) -> Result<(), FileOutHardlinkDo> {
 		let src = if !task.follow {
 			UrlCow::from(&task.from)
-		} else if let Ok(p) = provider::canonicalize(&task.from).await {
+		} else if let Ok(p) = engine::canonicalize(&task.from).await {
 			UrlCow::from(p)
 		} else {
 			UrlCow::from(&task.from)
 		};
 
-		ok_or_not_found(provider::remove_file(&task.to).await)?;
-		ok_or_not_found(provider::hard_link(&src, &task.to).await)?;
+		ok_or_not_found!(task, engine::remove_file(&task.to).await);
+		ok_or_not_found!(task, engine::hard_link(&src, &task.to).await);
 
 		Ok(self.ops.out(task.id, FileOutHardlinkDo::Succ))
 	}
 
-	pub(crate) async fn delete(&self, mut task: FileInDelete) -> Result<(), FileOutDelete> {
-		let meta = provider::symlink_metadata(&task.target).await?;
-		if !meta.is_dir() {
-			let id = task.id;
-			task.length = meta.len();
-			self.ops.out(id, FileOutDelete::New(meta.len()));
-			self.queue(task, NORMAL);
-			self.ops.out(id, FileOutDelete::Init);
-			return Ok(());
-		}
+	pub(crate) async fn delete(&self, task: FileInDelete) -> Result<(), FileOutDelete> {
+		let id = task.id;
 
-		let mut dirs = VecDeque::from([task.target]);
-		while let Some(target) = dirs.pop_front() {
-			let Ok(mut it) = provider::read_dir(&target).await else { continue };
+		super::traverse::<FileOutDelete, _, _, _, _, _>(
+			task,
+			async |_dir| Ok(()),
+			async |task, cha| {
+				self.ops.out(id, FileOutDelete::New(cha.len));
+				Ok(self.requeue(task, NORMAL))
+			},
+			|_err| {},
+		)
+		.await?;
 
-			while let Ok(Some(entry)) = it.next_entry().await {
-				let Ok(meta) = entry.metadata().await else { continue };
-
-				if meta.is_dir() {
-					dirs.push_front(entry.url());
-					continue;
-				}
-
-				task.target = entry.url();
-				task.length = meta.len();
-				self.ops.out(task.id, FileOutDelete::New(meta.len()));
-				self.queue(task.clone(), NORMAL);
-			}
-		}
-
-		Ok(self.ops.out(task.id, FileOutDelete::Init))
+		Ok(self.ops.out(id, FileOutDelete::Succ))
 	}
 
 	pub(crate) async fn delete_do(&self, task: FileInDelete) -> Result<(), FileOutDeleteDo> {
-		match provider::remove_file(&task.target).await {
+		let cha = task.cha.unwrap();
+		let result = if cha.is_dir() && cha.is_indirect() {
+			engine::remove_dir(&task.target).await
+		} else {
+			engine::remove_file(&task.target).await
+		};
+
+		match result {
 			Ok(()) => {}
 			Err(e) if e.kind() == NotFound => {}
 			Err(_) if !maybe_exists(&task.target).await => {}
-			Err(e) => Err(e)?,
+			Err(e) => ctx!(task, Err(e))?,
 		}
-		Ok(self.ops.out(task.id, FileOutDeleteDo::Succ(task.length)))
+		Ok(self.ops.out(task.id, FileOutDeleteDo::Succ(cha.len)))
 	}
 
-	pub(crate) fn trash(&self, task: FileInTrash) -> Result<(), FileOutTrash> {
-		Ok(self.queue(task, LOW))
+	pub(crate) async fn trash(&self, task: FileInTrash) -> Result<(), FileOutTrash> {
+		Ok(self.requeue(task, LOW))
 	}
 
 	pub(crate) async fn trash_do(&self, task: FileInTrash) -> Result<(), FileOutTrash> {
-		provider::trash(&task.target).await?;
+		ctx!(task, engine::trash(&task.target).await)?;
 		Ok(self.ops.out(task.id, FileOutTrash::Succ))
 	}
 
-	#[inline]
-	async fn cha<'a>(url: impl Into<Url<'a>>, follow: bool) -> io::Result<Cha> {
-		let url = url.into();
-		let meta = provider::symlink_metadata(url).await?;
-		Ok(if follow { Cha::from_follow(url, meta).await } else { Cha::new(url, meta) })
+	pub(crate) async fn download(&self, task: FileInDownload) -> Result<(), FileOutDownload> {
+		let id = task.id;
+
+		super::traverse::<FileOutDownload, _, _, _, _, _>(
+			task,
+			async |dir| {
+				let dir = dir.to_owned();
+				tokio::task::spawn_blocking(move || _ = Cwd::ensure(dir.as_url())).await.ok();
+				Ok(())
+			},
+			async |task, cha| {
+				Ok(if cha.is_orphan() {
+					Err(anyhow!("Failed to work on {task:?}: source of symlink doesn't exist"))?
+				} else {
+					self.ops.out(id, FileOutDownload::New(cha.len));
+					self.requeue(task, LOW);
+				})
+			},
+			|err| {
+				self.ops.out(id, FileOutDownload::Deform(err));
+			},
+		)
+		.await?;
+
+		Ok(self.ops.out(id, FileOutDownload::Succ))
 	}
 
-	#[inline]
-	async fn cha_from(entry: DirEntry, url: &UrlBuf, follow: bool) -> io::Result<Cha> {
-		Ok(if follow {
-			Cha::from_follow(url, entry.metadata().await?).await
+	pub(crate) async fn download_do(
+		&self,
+		mut task: FileInDownload,
+	) -> Result<(), FileOutDownloadDo> {
+		let cha = task.cha.unwrap();
+
+		let cache = ctx!(task, task.target.cache_entry(), "Cannot determine cache path")?;
+		let cache_tmp = ctx!(task, Transaction::tmp(&cache).await, "Cannot determine download cache")?;
+
+		let mut rx = ctx!(task, engine::copy_progressive(&task.target, &cache_tmp, cha).await)?;
+		loop {
+			match rx.recv().await.unwrap_or(Ok(0)) {
+				Ok(0) => {
+					Local::regular(&cache).remove_dir_all().await.ok();
+					ctx!(task, Stamp::write(cha, task.target.as_url()).await)?;
+					ctx!(task, engine::rename(cache_tmp, cache).await, "Cannot persist downloaded file")?;
+					break;
+				}
+				Ok(n) => self.ops.out(task.id, FileOutDownloadDo::Adv(n)),
+				Err(e) if e.kind() == NotFound => {
+					warn!("Download task partially done: {task:?}");
+					break;
+				}
+				// Operation not permitted (os error 1)
+				// Attribute not found (os error 93)
+				Err(e)
+					if task.retry < YAZI.tasks.bizarre_retry.get()
+						&& matches!(e.raw_os_error(), Some(1) | Some(93)) =>
+				{
+					task.retry += 1;
+					self.ops.out(task.id, FileOutDownloadDo::Log(format!("Retrying due to error: {e}")));
+					return Ok(self.requeue(task, LOW));
+				}
+				Err(e) => ctx!(task, Err(e))?,
+			}
+		}
+		Ok(self.ops.out(task.id, FileOutDownloadDo::Succ))
+	}
+
+	pub(crate) async fn upload(&self, task: FileInUpload) -> Result<(), FileOutUpload> {
+		let id = task.id;
+
+		super::traverse::<FileOutUpload, _, _, _, _, _>(
+			task,
+			async |_dir| Ok(()),
+			async |task, cha| {
+				let cache = ctx!(task, task.cache.as_ref(), "Cannot determine cache path")?;
+
+				Ok(match Self::cha(cache, true, None).await {
+					Ok(c) if c.mtime == cha.mtime => {}
+					Ok(c) => {
+						self.ops.out(id, FileOutUpload::New(c.len));
+						self.requeue(task, LOW);
+					}
+					Err(e) if e.kind() == NotFound => {}
+					Err(e) => ctx!(task, Err(e))?,
+				})
+			},
+			|err| {
+				self.ops.out(id, FileOutUpload::Deform(err));
+			},
+		)
+		.await?;
+
+		Ok(self.ops.out(id, FileOutUpload::Succ))
+	}
+
+	pub(crate) async fn upload_do(&self, task: FileInUpload) -> Result<(), FileOutUploadDo> {
+		let cha = task.cha.unwrap();
+		let cache = ctx!(task, task.cache.as_ref(), "Cannot determine cache path")?;
+
+		let stamp = ctx!(task, Stamp::read(&task.target).await)?;
+		ctx!(task, stamp.validate(cha, task.target.as_url()))?;
+
+		let tmp =
+			ctx!(task, Transaction::tmp(&task.target).await, "Cannot determine temporary upload path")?;
+		let mut rx = ctx!(
+			task,
+			engine::copy_progressive(cache, &tmp, Attrs {
+				mode:  Some(cha.mode),
+				atime: None,
+				btime: None,
+				mtime: None,
+			})
+			.await
+		)?;
+
+		loop {
+			match rx.recv().await.unwrap_or(Ok(0)) {
+				Ok(0) => {
+					let cha =
+						ctx!(task, Self::cha(&task.target, true, None).await, "Cannot stat original file")?;
+					if stamp.sig() != cha.hash_u128_str(&mut [0; 26]) {
+						Err(anyhow!("Failed to work on: {task:?}: remote file has changed during upload"))?;
+					}
+
+					ctx!(task, engine::rename(&tmp, &task.target).await, "Cannot persist uploaded file")?;
+
+					let cha =
+						ctx!(task, Self::cha(&task.target, true, None).await, "Cannot stat uploaded file")?;
+					ctx!(task, Stamp::write(cha, task.target.as_url()).await)?;
+
+					break;
+				}
+				Ok(n) => self.ops.out(task.id, FileOutUploadDo::Adv(n)),
+				Err(e) => ctx!(task, Err(e))?,
+			}
+		}
+		Ok(self.ops.out(task.id, FileOutUploadDo::Succ))
+	}
+
+	pub(super) async fn cha<U>(url: U, follow: bool, dent: Option<DirEntry>) -> io::Result<Cha>
+	where
+		U: AsUrl,
+	{
+		let cha = if let Some(dent) = dent {
+			dent.metadata().await?
 		} else {
-			Cha::new(url, entry.metadata().await?)
-		})
+			engine::symlink_metadata(url.as_url()).await?
+		};
+		Ok(if follow { Cha::from_follow(url, cha).await } else { cha })
 	}
 }
 
 impl File {
 	#[inline]
-	fn queue(&self, r#in: impl Into<TaskIn>, priority: u8) {
-		_ = self.r#macro.try_send(r#in.into(), priority);
+	pub(crate) fn submit(&self, r#in: impl Into<FileIn>, priority: u8) {
+		_ = self.tx.try_send(r#in.into(), priority);
+	}
+
+	#[inline]
+	fn requeue(&self, r#in: impl Into<FileIn>, priority: u8) {
+		_ = self.tx.try_send(r#in.into().into_doable(), priority);
 	}
 }

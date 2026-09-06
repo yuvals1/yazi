@@ -1,0 +1,182 @@
+use std::{io, ops::Deref, time::{Duration, Instant}};
+
+use hashbrown::{HashMap, hash_map::RawEntryMut};
+use indexmap::{IndexMap, IndexSet};
+use tokio::sync::mpsc;
+use yazi_fs::{Entries, FilesOp, file::{File, FileCov}};
+use yazi_shared::url::{UrlBuf, UrlCov, UrlLike, UrlMapExt};
+use yazi_vfs::VfsEntries;
+
+#[derive(Clone)]
+pub struct Refresher {
+	tx: mpsc::UnboundedSender<Op>,
+}
+
+enum Op {
+	Sync(IndexSet<FileCov>),
+	Refresh(IndexMap<FileCov, bool>),
+	Done(Entry, io::Result<Option<Vec<File>>>),
+}
+
+impl Refresher {
+	pub(super) fn serve() -> Self {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let me = Self { tx };
+
+		let me_ = me.clone();
+		tokio::spawn(async move {
+			let mut entries = HashMap::new();
+			let mut interval = tokio::time::interval(Duration::from_secs(2));
+
+			loop {
+				tokio::select! {
+					Some(op) = rx.recv() => me_.handle(op, &mut entries).await,
+					_ = interval.tick() => {
+						for (_, entry) in entries.iter_mut().filter(|(u, _)| u.kind().is_virtual()) {
+							entry.dirty = true;
+							me_.spawn(entry);
+						}
+					}
+				}
+			}
+		});
+
+		me
+	}
+
+	async fn handle(&self, op: Op, entries: &mut HashMap<UrlBuf, Entry>) {
+		match op {
+			Op::Sync(files) => {
+				entries.retain(|url, _| files.contains(&UrlCov::new(url)));
+				for file in files {
+					entries.get_or_insert_with(file.0, |file| Entry { file, ..Default::default() });
+				}
+			}
+			Op::Refresh(requests) => {
+				for (FileCov(file), force) in requests {
+					let entry = match entries.raw_entry_mut().from_key(&file.url) {
+						RawEntryMut::Occupied(mut oe) => {
+							oe.get_mut().file = file;
+							oe.into_mut()
+						}
+						RawEntryMut::Vacant(ve) => {
+							ve.insert(file.url.to_owned(), Entry { file, ..Default::default() }).1
+						}
+					};
+
+					(entry.dirty, entry.report, entry.force) = (true, true, entry.force || force);
+					self.spawn(entry);
+				}
+			}
+			Op::Done(prev, result) => {
+				let Some(entry) = entries.get_mut(&prev.url) else { return };
+				if entry.busy != prev.busy {
+					return;
+				}
+
+				match result {
+					Ok(Some(files)) => {
+						entry.file = prev.file.clone();
+						FilesOp::Full(prev.file, files).emit();
+					}
+					Ok(None) => {}
+					Err(e) if e.kind() == io::ErrorKind::NotFound => {
+						if let Some((t, n)) = prev.url.pair() {
+							FilesOp::Deleting(t.into(), [n.into()].into()).emit();
+						}
+					}
+					Err(e) if prev.report => {
+						FilesOp::IOErr(prev.file.url, e.into()).emit();
+					}
+					Err(e) => yazi_macro::debug!("Failed to refresh {:?}: {e:?}", prev.url),
+				}
+
+				entry.busy = None;
+				self.spawn(entry); // A new request may have arrived while this entry was busy.
+			}
+		}
+	}
+
+	fn spawn(&self, entry: &mut Entry) {
+		if entry.busy.is_some() || !entry.dirty {
+			return;
+		}
+
+		let (tx, mut prev) = (self.tx.clone(), entry.turn());
+		tokio::spawn(async move {
+			let result = async {
+				Ok(if prev.force {
+					Some(Entries::from_dir_bulk(&prev.file.url).await?)
+				} else if let Some(file) = Entries::revalidate(&prev.file).await? {
+					prev.file = file;
+					Some(Entries::from_dir_bulk(&prev.url).await?)
+				} else {
+					None
+				})
+			}
+			.await;
+			tx.send(Op::Done(prev, result)).ok();
+		});
+	}
+}
+
+impl Refresher {
+	pub(super) fn sync(&self, files: IndexSet<FileCov>) { self.tx.send(Op::Sync(files)).ok(); }
+
+	pub fn refresh<I>(&self, requests: I)
+	where
+		I: IntoIterator,
+		I::Item: Into<RefreshRequest>,
+	{
+		let mut files = IndexMap::new();
+		for request in requests.into_iter().map(Into::into) {
+			files
+				.entry(FileCov(request.file))
+				.and_modify(|force| *force |= request.force)
+				.or_insert(request.force);
+		}
+		self.tx.send(Op::Refresh(files)).ok();
+	}
+}
+
+// --- RefreshRequest
+pub struct RefreshRequest {
+	pub file:  File,
+	pub force: bool,
+}
+
+impl Deref for RefreshRequest {
+	type Target = File;
+
+	fn deref(&self) -> &Self::Target { &self.file }
+}
+
+impl RefreshRequest {
+	pub fn force(file: impl Into<File>) -> Self { Self { file: file.into(), force: true } }
+}
+
+// --- Entry
+#[derive(Clone, Default)]
+struct Entry {
+	file:   File,
+	busy:   Option<Instant>,
+	dirty:  bool,
+	report: bool,
+	force:  bool,
+}
+
+impl Deref for Entry {
+	type Target = File;
+
+	fn deref(&self) -> &Self::Target { &self.file }
+}
+
+impl Entry {
+	fn turn(&mut self) -> Self {
+		self.busy = Some(Instant::now());
+		let me = self.clone();
+
+		(self.dirty, self.report, self.force) = (false, false, false);
+		me
+	}
+}

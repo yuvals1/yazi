@@ -1,51 +1,71 @@
-use hashbrown::HashSet;
-use tracing::debug;
-use yazi_shared::url::{UrlBuf, UrlBufCov};
+use yazi_macro::debug;
+use yazi_scheduler::file::{FileInCopy, FileInLink, FileInMove};
+use yazi_shared::url::{UrlBuf, UrlLike};
 
 use super::Tasks;
 use crate::mgr::Yanked;
 
 impl Tasks {
-	pub fn file_cut(&self, src: &Yanked, dest: &UrlBuf, force: bool) {
-		for u in src.iter() {
-			let to = dest.join(u.name().unwrap());
-			if force && *u == to {
-				debug!("file_cut: same file, skipping {:?}", to);
+	pub fn file_move(&self, src: &Yanked, dest: &UrlBuf, force: bool) {
+		self.scheduler.behavior.reset();
+
+		for u in src.urls() {
+			let Some(Ok(to)) = u.name().map(|n| dest.try_join(n)) else {
+				debug!("file_move: cannot join {u:?} with {dest:?}");
+				continue;
+			};
+			if force && u == to {
+				debug!("file_move: same file, skip {to:?}");
 			} else {
-				self.scheduler.file_cut(u.0.clone(), to, force);
+				self.scheduler.file_move(FileInMove::new(u.clone(), to, force));
 			}
 		}
 	}
 
 	pub fn file_copy(&self, src: &Yanked, dest: &UrlBuf, force: bool, follow: bool) {
-		for u in src.iter() {
-			let to = dest.join(u.name().unwrap());
-			if force && *u == to {
-				debug!("file_copy: same file, skipping {:?}", to);
+		self.scheduler.behavior.reset();
+
+		for u in src.urls() {
+			let Some(Ok(to)) = u.name().map(|n| dest.try_join(n)) else {
+				debug!("file_copy: cannot join {u:?} with {dest:?}");
+				continue;
+			};
+			if force && u == to {
+				debug!("file_copy: same file, skip {to:?}");
 			} else {
-				self.scheduler.file_copy(u.0.clone(), to, force, follow);
+				self.scheduler.file_copy(FileInCopy::new(u.clone(), to, force, follow));
 			}
 		}
 	}
 
-	pub fn file_link(&self, src: &HashSet<UrlBufCov>, dest: &UrlBuf, relative: bool, force: bool) {
-		for u in src {
-			let to = dest.join(u.name().unwrap());
-			if force && *u == to {
-				debug!("file_link: same file, skipping {:?}", to);
+	pub fn file_link(&self, src: &Yanked, dest: &UrlBuf, relative: bool, force: bool, follow: bool) {
+		self.scheduler.behavior.reset();
+
+		for u in src.urls() {
+			let Some(Ok(to)) = u.name().map(|n| dest.try_join(n)) else {
+				debug!("file_link: cannot join {u:?} with {dest:?}");
+				continue;
+			};
+			if force && u == to {
+				debug!("file_link: same file, skip {to:?}");
 			} else {
-				self.scheduler.file_link(u.0.clone(), to, relative, force);
+				self.scheduler.file_link(FileInLink::new(u.clone(), to, relative, force, follow));
 			}
 		}
 	}
 
-	pub fn file_hardlink(&self, src: &HashSet<UrlBufCov>, dest: &UrlBuf, force: bool, follow: bool) {
-		for u in src {
-			let to = dest.join(u.name().unwrap());
-			if force && *u == to {
-				debug!("file_hardlink: same file, skipping {:?}", to);
+	pub fn file_hardlink(&self, src: &Yanked, dest: &UrlBuf, force: bool, follow: bool) {
+		self.scheduler.behavior.reset();
+
+		for u in src.urls() {
+			let Some(Ok(to)) = u.name().map(|n| dest.try_join(n)) else {
+				debug!("file_hardlink: cannot join {u:?} with {dest:?}");
+				continue;
+			};
+			if force && u == to {
+				debug!("file_hardlink: same file, skip {to:?}");
 			} else {
-				self.scheduler.file_hardlink(u.0.clone(), to, force, follow);
+				self.scheduler.file_hardlink(u.clone(), to, force, follow);
 			}
 		}
 	}

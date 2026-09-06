@@ -4,9 +4,10 @@
   rev ? "unknown",
   date ? "19700101",
   lib,
+  stdenv,
 
   installShellFiles,
-  stdenv,
+  fetchFromGitHub,
   rust-jemalloc-sys,
 
   imagemagick,
@@ -15,6 +16,7 @@ let
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
+      ../.cargo
       ../assets
       ../Cargo.toml
       ../Cargo.lock
@@ -22,21 +24,20 @@ let
     ];
   };
 in
-rustPlatform.buildRustPackage rec {
+rustPlatform.buildRustPackage (finalAttrs: {
   pname = "yazi";
   inherit version src;
 
   cargoLock = {
     lockFile = "${src}/Cargo.lock";
-    #outputHashes = {
-    #  "mlua-0.10.0" = "sha256-Xg6/jc+UP8tbJJ6x1sbAgt8ZHt051xEBBcjmikQqYlw=";
-    #};
+    allowBuiltinFetchGit = true;
   };
 
   env = {
     YAZI_GEN_COMPLETIONS = true;
     VERGEN_GIT_SHA = rev;
     VERGEN_BUILD_DATE = builtins.concatStringsSep "-" (builtins.match "(.{4})(.{2})(.{2}).*" date);
+    CARGO_NET_OFFLINE = "true";
   };
 
   nativeBuildInputs = [
@@ -48,11 +49,22 @@ rustPlatform.buildRustPackage rec {
     rust-jemalloc-sys
   ];
 
+  buildPhase = ''
+    runHook preBuild
+    cargo xtask build --target ${stdenv.hostPlatform.rust.rustcTarget}
+    runHook postBuild
+  '';
+
   postInstall = ''
     installShellCompletion --cmd yazi \
       --bash ./yazi-boot/completions/yazi.bash \
       --fish ./yazi-boot/completions/yazi.fish \
       --zsh  ./yazi-boot/completions/_yazi
+
+    installShellCompletion --cmd ya \
+      --bash ./yazi-cli/completions/ya.bash \
+      --fish ./yazi-cli/completions/ya.fish \
+      --zsh  ./yazi-cli/completions/_ya
 
     # Resize logo
     for RES in 16 24 32 48 64 128 256; do
@@ -60,9 +72,22 @@ rustPlatform.buildRustPackage rec {
       magick assets/logo.png -resize "$RES"x"$RES" $out/share/icons/hicolor/"$RES"x"$RES"/apps/yazi.png
     done
 
+    installManPage ${finalAttrs.passthru.srcs.man_src}/yazi{.1,-config.5}
+
     mkdir -p $out/share/applications
     install -m644 assets/yazi.desktop $out/share/applications/
   '';
+
+  passthru.srcs = {
+    man_src = fetchFromGitHub {
+      name = "manpages"; # needed to ensure name is unique
+      owner = "yazi-rs";
+      repo = "manpages";
+      rev = "8950e968f4a1ad0b83d5836ec54a070855068dbf";
+      hash = "sha256-kEVXejDg4ChFoMNBvKlwdFEyUuTcY2VuK9j0PdafKus=";
+    };
+  };
+
 
   meta = {
     description = "Blazing fast terminal file manager written in Rust, based on async I/O";
@@ -70,4 +95,4 @@ rustPlatform.buildRustPackage rec {
     license = lib.licenses.mit;
     mainProgram = "yazi";
   };
-}
+})

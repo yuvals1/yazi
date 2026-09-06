@@ -1,8 +1,9 @@
-use crossterm::cursor::SetCursorStyle;
-use ratatui::layout::{Position, Rect};
+use ratatui_core::layout::{Position, Rect};
 use yazi_shared::Layer;
+use yazi_shim::ratatui::Padable;
+use yazi_tty::sequence::SetCursorStyle;
 
-use crate::{cmp::Cmp, confirm::Confirm, help::Help, input::Input, mgr::Mgr, notify::Notify, pick::Pick, tab::{Folder, Tab}, tasks::Tasks, which::Which};
+use crate::{cmp::Cmp, confirm::Confirm, help::Help, input::{Input, InputGuard}, mgr::Mgr, notify::Notify, pick::Pick, tab::Tab, tasks::Tasks, which::Which};
 
 pub struct Core {
 	pub mgr:     Mgr,
@@ -32,21 +33,24 @@ impl Core {
 	}
 
 	pub fn cursor(&self) -> Option<(Position, SetCursorStyle)> {
-		if self.input.visible {
-			let Rect { x, y, .. } = self.mgr.area(self.input.position);
-			return Some((
-				Position { x: x + 1 + self.input.cursor(), y: y + 1 },
-				self.input.cursor_shape(),
-			));
+		if let Some(cursor) = self.help.cursor() {
+			let Rect { x, y, .. } = self.mgr.area(self.help.position).padding(self.help.padding());
+			return Some((Position { x: x + cursor, y }, self.help.cursor_shape()?));
 		}
-		if let Some((x, y)) = self.help.cursor() {
-			return Some((Position { x, y }, self.help.cursor_shape()));
+
+		if let Some(guard) = self.input.lock() {
+			let Rect { x, y, .. } = match &guard {
+				InputGuard::Main(_) => self.mgr.area(self.input.position()?).padding(self.input.padding()),
+				InputGuard::Alt(_) => self.mgr.area(self.input.position()?),
+			};
+			return Some((Position { x: x + guard.cursor(), y }, guard.cursor_shape()));
 		}
+
 		None
 	}
 
 	pub fn layer(&self) -> Layer {
-		if self.which.visible {
+		if self.which.active {
 			Layer::Which
 		} else if self.cmp.visible {
 			Layer::Cmp
@@ -54,7 +58,7 @@ impl Core {
 			Layer::Help
 		} else if self.confirm.visible {
 			Layer::Confirm
-		} else if self.input.visible {
+		} else if self.input.focus() {
 			Layer::Input
 		} else if self.pick.visible {
 			Layer::Pick
@@ -74,10 +78,4 @@ impl Core {
 
 	#[inline]
 	pub fn active_mut(&mut self) -> &mut Tab { self.mgr.active_mut() }
-
-	#[inline]
-	pub fn current_mut(&mut self) -> &mut Folder { self.mgr.current_mut() }
-
-	#[inline]
-	pub fn parent_mut(&mut self) -> Option<&mut Folder> { self.mgr.parent_mut() }
 }

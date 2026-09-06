@@ -32,7 +32,7 @@
         rev = self.shortRev or self.dirtyShortRev or "dirty";
         date = self.lastModifiedDate or self.lastModified or "19700101";
         version =
-          (builtins.fromTOML (builtins.readFile ./yazi-fm/Cargo.toml)).package.version
+          (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version
           + "pre${builtins.substring 0 8 date}_${rev}";
       in
       {
@@ -45,21 +45,28 @@
               rustPlatform
               ;
           };
-          yazi = pkgs.callPackage ./nix/yazi.nix { inherit (self.packages.${system}) yazi-unwrapped; };
+          yazi = pkgs.callPackage ./nix/yazi.nix {
+            inherit (self.packages.${system}) yazi-unwrapped;
+          };
           default = self.packages.${system}.yazi;
         };
 
         devShells = {
-          default = pkgs.callPackage ./nix/shell.nix { };
+          default = pkgs.callPackage ./nix/shell.nix {
+            inherit toolchain;
+            inherit (self.packages.${system}) yazi yazi-unwrapped;
+          };
         };
 
-        formatter = pkgs.nixfmt-rfc-style;
+        formatter = pkgs.nixfmt-tree;
       }
     )
     // {
       overlays = {
         default = self.overlays.yazi;
-        yazi = _: prev: { inherit (self.packages.${prev.stdenv.system}) yazi yazi-unwrapped; };
+        yazi = _: prev: {
+          inherit (self.packages.${prev.stdenv.system}) yazi yazi-unwrapped;
+        };
       };
     };
 }

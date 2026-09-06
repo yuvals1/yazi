@@ -1,12 +1,12 @@
-use std::{mem, ops::Deref, sync::atomic::{AtomicU64, Ordering}, time::UNIX_EPOCH};
+use std::{mem, ops::Deref, sync::atomic::{AtomicU64, Ordering}};
 
 use anyhow::Result;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufWriter};
-use yazi_boot::BOOT;
-use yazi_fs::provider::local::{Gate, Local};
-use yazi_shared::{RoCell, timestamp_us};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use yazi_fs::{Xdg, engine::{Engine, FileBuilder, local::{Demand, Local}}};
+use yazi_shared::timestamp_us;
+use yazi_shim::cell::RoCell;
 
 use crate::CLIENTS;
 
@@ -25,7 +25,8 @@ impl Deref for State {
 }
 
 impl State {
-	pub fn set(&self, kind: &str, sender: u64, body: &str) -> bool {
+	pub(crate) fn set(&self, kind: &str, sender: u64, body: &str) -> bool {
+		debug_assert!(kind.starts_with('@'));
 		let Some(inner) = &mut *self.inner.write() else { return false };
 
 		if body == "null" {
@@ -45,7 +46,7 @@ impl State {
 		true
 	}
 
-	pub async fn load_or_create(&self) {
+	pub(crate) async fn load_or_create(&self) {
 		if self.load().await.is_err() {
 			self.inner.write().replace(Default::default());
 			self.last.store(timestamp_us(), Ordering::Relaxed);
@@ -58,13 +59,15 @@ impl State {
 			return Ok(());
 		}
 
-		Local::create_dir_all(&BOOT.state_dir).await?;
+		let state_dir = Xdg::state_dir();
+		Local::regular(&state_dir).create_dir_all().await?;
+
 		let mut buf = BufWriter::new(
-			Gate::default()
+			Demand::default()
 				.write(true)
 				.create(true)
 				.truncate(true)
-				.open(BOOT.state_dir.join(".dds"))
+				.open(state_dir.join(".dds"))
 				.await?,
 		);
 
@@ -79,7 +82,7 @@ impl State {
 	}
 
 	async fn load(&self) -> Result<()> {
-		let mut file = Local::open(BOOT.state_dir.join(".dds")).await?.reader();
+		let mut file = BufReader::new(Local::regular(&Xdg::state_dir().join(".dds")).open().await?);
 		let mut buf = String::new();
 
 		let mut inner = HashMap::new();
@@ -87,7 +90,7 @@ impl State {
 			let line = mem::take(&mut buf);
 			let mut parts = line.splitn(4, ',');
 
-			let Some(kind) = parts.next() else { continue };
+			let Some(kind) = parts.next().filter(|s| s.starts_with('@')) else { continue };
 			let Some(_) = parts.next() else { continue };
 			inner.insert(kind.to_owned(), line);
 		}
@@ -103,8 +106,8 @@ impl State {
 	}
 
 	async fn skip(&self) -> Result<bool> {
-		let meta = Local::symlink_metadata(BOOT.state_dir.join(".dds")).await?;
-		let modified = meta.modified()?.duration_since(UNIX_EPOCH)?.as_micros();
+		let cha = Local::regular(&Xdg::state_dir().join(".dds")).symlink_metadata().await?;
+		let modified = cha.mtime_dur()?.as_micros();
 		Ok(modified >= self.last.load(Ordering::Relaxed) as u128)
 	}
 }

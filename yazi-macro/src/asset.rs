@@ -6,7 +6,7 @@ macro_rules! config_preset {
 			std::borrow::Cow::from(
 				std::fs::read_to_string(concat!(
 					env!("CARGO_MANIFEST_DIR"),
-					"/preset/",
+					"/../yazi-config/preset/",
 					$name,
 					"-default.toml"
 				))
@@ -17,7 +17,7 @@ macro_rules! config_preset {
 		{
 			std::borrow::Cow::from(include_str!(concat!(
 				env!("CARGO_MANIFEST_DIR"),
-				"/preset/",
+				"/../yazi-config/preset/",
 				$name,
 				"-default.toml"
 			)))
@@ -30,15 +30,13 @@ macro_rules! plugin_preset {
 	($name:literal) => {{
 		#[cfg(debug_assertions)]
 		{
-			std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/preset/", $name, ".lua")).expect(concat!(
-				"Failed to read 'yazi-plugin/preset/",
-				$name,
-				".lua'"
-			))
+			std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../yazi-plugin/preset/", $name, ".lua"))
+				.expect(concat!("Failed to read 'yazi-plugin/preset/", $name, ".lua'"))
 		}
 		#[cfg(not(debug_assertions))]
 		{
-			&include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/preset/", $name, ".lua"))[..]
+			&include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../yazi-plugin/preset/", $name, ".lua"))
+				[..]
 		}
 	}};
 }

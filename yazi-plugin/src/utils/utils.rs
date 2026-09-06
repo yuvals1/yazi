@@ -3,23 +3,22 @@ use yazi_binding::{Composer, ComposerSet};
 
 pub(super) struct Utils;
 
-pub fn compose(
+pub(crate) fn compose(
 	isolate: bool,
 ) -> Composer<impl Fn(&Lua, &[u8]) -> mlua::Result<Value>, ComposerSet> {
 	fn get(lua: &Lua, key: &[u8], isolate: bool) -> mlua::Result<Value> {
 		match key {
 			// App
 			b"id" => Utils::id(lua)?,
-			b"hide" => Utils::hide(lua)?,
+			b"drop" => Utils::drop(lua)?,
+			b"hold" => Utils::hold(lua)?,
 
 			// Cache
 			b"file_cache" => Utils::file_cache(lua)?,
 
 			// Call
-			b"render" => Utils::render(lua)?,
 			b"emit" => Utils::emit(lua)?,
-			b"mgr_emit" => Utils::mgr_emit(lua)?,
-			b"manager_emit" => Utils::mgr_emit(lua)?, // TODO: remove this in the future
+			b"exec" => Utils::exec(lua)?,
 
 			// Image
 			b"image_info" => Utils::image_info(lua)?,
@@ -52,8 +51,12 @@ pub fn compose(
 			b"spot_widgets" => Utils::spot_widgets(lua)?,
 
 			// Sync
-			b"sync" => Utils::sync(lua, isolate)?,
+			b"co" => Utils::co(lua)?,
+			b"sync" => Utils::sync(lua)?,
+			b"async" => Utils::r#async(lua, isolate)?,
+			b"async_blocking" => Utils::async_blocking(lua)?,
 			b"chan" => Utils::chan(lua)?,
+			b"chunk" => Utils::chunk(lua)?,
 			b"join" => Utils::join(lua)?,
 			b"select" => Utils::select(lua)?,
 
@@ -64,12 +67,15 @@ pub fn compose(
 			// Text
 			b"hash" => Utils::hash(lua)?,
 			b"quote" => Utils::quote(lua)?,
-			b"truncate" => Utils::truncate(lua)?,
 			b"clipboard" => Utils::clipboard(lua)?,
+			b"base64_decode" => Utils::base64_decode(lua)?,
+			b"percent_encode" => Utils::percent_encode(lua)?,
+			b"percent_decode" => Utils::percent_decode(lua)?,
 
 			// Time
 			b"time" => Utils::time(lua)?,
 			b"sleep" => Utils::sleep(lua)?,
+			b"throttle" => Utils::throttle(lua)?,
 
 			// User
 			#[cfg(unix)]
@@ -82,6 +88,12 @@ pub fn compose(
 			b"group_name" => Utils::group_name(lua)?,
 			#[cfg(unix)]
 			b"host_name" => Utils::host_name(lua)?,
+
+			// HTTP
+			b"http" => return Utils::http(lua)?.into_lua(lua),
+
+			// Task
+			b"task" => Utils::task(lua)?,
 
 			_ => return Ok(Value::Nil),
 		}

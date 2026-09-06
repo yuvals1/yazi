@@ -1,29 +1,30 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{SStr, event::CmdCow};
+use yazi_shared::event::ActionCow;
+use yazi_shim::SStr;
 
 #[derive(Debug)]
-pub struct RenameOpt {
+pub struct RenameForm {
 	pub hovered: bool,
 	pub force:   bool,
 	pub empty:   SStr,
 	pub cursor:  SStr,
 }
 
-impl From<CmdCow> for RenameOpt {
-	fn from(mut c: CmdCow) -> Self {
+impl From<ActionCow> for RenameForm {
+	fn from(mut a: ActionCow) -> Self {
 		Self {
-			hovered: c.bool("hovered"),
-			force:   c.bool("force"),
-			empty:   c.take_str("empty").unwrap_or_default(),
-			cursor:  c.take_str("cursor").unwrap_or_default(),
+			hovered: a.bool("hovered"),
+			force:   a.bool("force"),
+			empty:   a.take("empty").unwrap_or_default(),
+			cursor:  a.take("cursor").unwrap_or_default(),
 		}
 	}
 }
 
-impl FromLua for RenameOpt {
+impl FromLua for RenameForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for RenameOpt {
+impl IntoLua for RenameForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

@@ -1,63 +1,57 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_fs::path::expand_url;
-use yazi_shared::{event::CmdCow, url::{Url, UrlBuf, UrlCow}};
+use serde::Deserialize;
+use yazi_core::mgr::CdSource;
+use yazi_fs::path::{clean_url, expand_url};
+use yazi_shared::{event::ActionCow, url::{Url, UrlBuf}};
+use yazi_vfs::engine;
 
-#[derive(Debug)]
-pub struct CdOpt {
-	pub target:      UrlCow<'static>,
-	pub interactive: bool,
-	pub source:      CdSource,
+#[derive(Debug, Deserialize)]
+pub struct CdForm {
+	#[serde(alias = "0", default)]
+	pub target:        UrlBuf,
+	#[serde(default)]
+	pub interactive:   bool,
+	#[serde(default)]
+	raw:               bool,
+	#[serde(default)]
+	pub(crate) source: CdSource,
 }
 
-impl From<CmdCow> for CdOpt {
-	fn from(mut c: CmdCow) -> Self {
-		let mut target = c.take_first_url().unwrap_or_default();
+impl TryFrom<ActionCow> for CdForm {
+	type Error = anyhow::Error;
 
-		if !c.bool("raw") {
-			target = expand_url(target).into();
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> {
+		let mut me: Self = a.deserialize()?;
+
+		if !me.raw {
+			me.target = expand_url(me.target).into_owned();
 		}
 
-		Self { target, interactive: c.bool("interactive"), source: CdSource::Cd }
+		if let Some(u) = engine::try_absolute(&me.target)
+			&& u.is_owned()
+		{
+			me.target = u.into_owned();
+		}
+
+		me.target = clean_url(me.target);
+		Ok(me)
 	}
 }
 
-impl From<(UrlCow<'static>, CdSource)> for CdOpt {
-	fn from((target, source): (UrlCow<'static>, CdSource)) -> Self {
-		Self { target, interactive: false, source }
-	}
-}
-
-impl From<(UrlBuf, CdSource)> for CdOpt {
+impl From<(UrlBuf, CdSource)> for CdForm {
 	fn from((target, source): (UrlBuf, CdSource)) -> Self {
-		Self::from((UrlCow::from(target), source))
+		Self { target, interactive: false, raw: false, source }
 	}
 }
 
-impl From<(Url<'_>, CdSource)> for CdOpt {
+impl From<(Url<'_>, CdSource)> for CdForm {
 	fn from((target, source): (Url, CdSource)) -> Self { Self::from((target.to_owned(), source)) }
 }
 
-impl FromLua for CdOpt {
+impl FromLua for CdForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for CdOpt {
+impl IntoLua for CdForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
-}
-
-// --- Source
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CdSource {
-	Tab,
-	Cd,
-	Reveal,
-	Enter,
-	Leave,
-	Forward,
-	Back,
-}
-
-impl CdSource {
-	#[inline]
-	pub fn big_jump(self) -> bool { self == Self::Cd || self == Self::Reveal }
 }

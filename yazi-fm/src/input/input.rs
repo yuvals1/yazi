@@ -1,28 +1,63 @@
-use ratatui::{buffer::Buffer, layout::{Margin, Rect}, text::Line, widgets::{Block, BorderType, Widget}};
-use yazi_config::THEME;
+use std::path::Path;
+
+use ratatui_core::{buffer::Buffer, layout::{Margin, Rect}, text::Line, widgets::Widget};
+use ratatui_widgets::{block::Block, borders::BorderType};
+use yazi_config::{Icon, THEME};
 use yazi_core::Core;
+use yazi_fs::{cha::{Cha, ChaKind}, file::File};
+use yazi_shim::path::CROSS_SEPARATOR;
 
 pub(crate) struct Input<'a> {
-	core: &'a Core,
+	core: &'a mut Core,
 }
 
 impl<'a> Input<'a> {
-	pub(crate) fn new(core: &'a Core) -> Self { Self { core } }
+	pub(crate) fn new(core: &'a mut Core) -> Self { Self { core } }
+
+	fn icon(&self) -> Option<Icon> {
+		let input = &self.core.input.main;
+
+		let is_dir = input.value().ends_with(CROSS_SEPARATOR);
+		let is_hovered = input.name.starts_with("rename-");
+
+		let (path, mode): (&str, u16) = match input.name.as_str() {
+			"cd" => (input.value(), if is_dir { 0o40755 } else { 0o100644 }),
+			"create-file" => (input.value(), if is_dir { 0o40755 } else { 0o100644 }),
+			"create-dir" => (input.value(), 0o40755),
+			"rename-file" => (input.value(), 0o100644),
+			"rename-dir" => (input.value(), 0o40755),
+			"shell" => ("icon.sh", 0o100644),
+			_ => return None,
+		};
+
+		THEME.icon.matches(
+			&File {
+				url:   Path::new(path).into(),
+				cha:   Cha { kind: ChaKind::empty(), mode: mode.try_into().ok()?, ..Default::default() },
+				extra: Default::default(),
+			},
+			is_hovered,
+		)
+	}
 }
 
 impl Widget for Input<'_> {
 	fn render(self, _: Rect, buf: &mut Buffer) {
-		let input = &self.core.input;
-		let area = self.core.mgr.area(input.position);
+		let outer = self.core.mgr.area(self.core.input.main.position);
+		yazi_widgets::clear::Clear::default().render(outer, buf);
 
-		yazi_binding::elements::Clear::default().render(area, buf);
-
-		Block::bordered()
+		let mut block = Block::bordered()
 			.border_type(BorderType::Rounded)
-			.border_style(THEME.input.border)
-			.title(Line::styled(&input.title, THEME.input.title))
-			.render(area, buf);
+			.border_style(THEME.input.border.get())
+			.title(Line::styled(&self.core.input.main.title, THEME.input.title.get()));
 
-		input.render(area.inner(Margin::new(1, 1)), buf);
+		if let Some(i) = self.icon() {
+			block = block.title_bottom(Line::raw(format!("{} ", i.text)).style(i.style).right_aligned());
+		}
+		block.render(outer, buf);
+
+		let inner = outer.inner(Margin::new(1, 1));
+		self.core.input.main.repos(inner);
+		self.core.input.main.render(inner, buf);
 	}
 }

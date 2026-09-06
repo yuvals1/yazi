@@ -1,34 +1,32 @@
-use std::str::FromStr;
-
-use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
+use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Value};
 use serde::{Deserialize, Serialize};
-use yazi_shared::event::CmdCow;
+use yazi_shared::event::ActionCow;
+use yazi_shim::mlua::SER_OPT;
 
-#[derive(Debug, Default)]
-pub struct HiddenOpt {
-	pub state: HiddenOptState,
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct HiddenForm {
+	#[serde(alias = "0")]
+	pub state: HiddenFormState,
 }
 
-impl TryFrom<CmdCow> for HiddenOpt {
+impl TryFrom<ActionCow> for HiddenForm {
 	type Error = anyhow::Error;
 
-	fn try_from(c: CmdCow) -> Result<Self, Self::Error> {
-		Ok(Self { state: c.first_str().map(FromStr::from_str).transpose()?.unwrap_or_default() })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for HiddenOpt {
-	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+impl FromLua for HiddenForm {
+	fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> { lua.from_value(value) }
 }
 
-impl IntoLua for HiddenOpt {
-	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+impl IntoLua for HiddenForm {
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> { lua.to_value_with(&self, SER_OPT) }
 }
 
 // --- State
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum HiddenOptState {
+pub enum HiddenFormState {
 	#[default]
 	None,
 	Show,
@@ -36,15 +34,7 @@ pub enum HiddenOptState {
 	Toggle,
 }
 
-impl FromStr for HiddenOptState {
-	type Err = serde::de::value::Error;
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		Self::deserialize(serde::de::value::StrDeserializer::new(s))
-	}
-}
-
-impl HiddenOptState {
+impl HiddenFormState {
 	pub fn bool(self, old: bool) -> bool {
 		match self {
 			Self::None => old,

@@ -1,255 +1,103 @@
-use std::ops::Deref;
-
 use anyhow::Result;
 use hashbrown::HashMap;
-use serde::{Deserialize, Deserializer};
-use yazi_codegen::DeserializeOver2;
-use yazi_fs::File;
-use yazi_shared::Condition;
+use serde::Deserialize;
+use yazi_codegen::{DeserializeOver2, Overlay};
+use yazi_fs::file::File;
+use yazi_shared::{NonEmptyString, url::UrlLike};
+use yazi_shim::{cell::SyncCell, toml::DeserializeOverHook};
 
-use crate::{Color, Icon as I, Pattern, Style};
+use super::{IconCond, IconConds, IconGlob, IconGlobs, IconNames, deserialize_icon_names};
+use crate::{Icon as I, mix};
 
-#[derive(Default, Deserialize, DeserializeOver2)]
+#[derive(Default, Deserialize, DeserializeOver2, Overlay)]
 pub struct Icon {
 	#[serde(default = "Icon::default_true")]
-	tag_override:  bool,
-	globs:         PatIcons,
+	tag_override:  SyncCell<bool>,
+	globs:         IconGlobs,
 	#[serde(default)]
-	prepend_globs: PatIcons,
+	prepend_globs: Vec<IconGlob>,
 	#[serde(default)]
-	append_globs:  PatIcons,
+	append_globs:  Vec<IconGlob>,
 
-	dirs:         StrIcons,
-	#[serde(default)]
-	prepend_dirs: StrIcons,
-	#[serde(default)]
-	append_dirs:  StrIcons,
+	dirs:         IconNames,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	prepend_dirs: HashMap<NonEmptyString, I>,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	append_dirs:  HashMap<NonEmptyString, I>,
 
-	files:         StrIcons,
-	#[serde(default)]
-	prepend_files: StrIcons,
-	#[serde(default)]
-	append_files:  StrIcons,
+	files:         IconNames,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	prepend_files: HashMap<NonEmptyString, I>,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	append_files:  HashMap<NonEmptyString, I>,
 
-	exts:         StrIcons,
-	#[serde(default)]
-	prepend_exts: StrIcons,
-	#[serde(default)]
-	append_exts:  StrIcons,
+	exts:         IconNames,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	prepend_exts: HashMap<NonEmptyString, I>,
+	#[serde(default, deserialize_with = "deserialize_icon_names")]
+	append_exts:  HashMap<NonEmptyString, I>,
 
-	conds:         CondIcons,
+	conds:         IconConds,
 	#[serde(default)]
-	prepend_conds: CondIcons,
+	prepend_conds: Vec<IconCond>,
 	#[serde(default)]
-	append_conds:  CondIcons,
+	append_conds:  Vec<IconCond>,
 }
 
 impl Icon {
 	#[inline]
-	fn default_true() -> bool { true }
+	fn default_true() -> SyncCell<bool> { SyncCell::new(true) }
 
-	pub fn matches(&self, file: &File) -> Option<&I> {
-		use std::cell::Cell;
-
+	pub fn matches(&self, file: &File, hovered: bool) -> Option<I> {
 		// Optional: tag-based icon conditions override everything
-		if self.tag_override {
-			for (c, i) in self.conds.iter() {
-				let seen_tag = Cell::new(false);
-				let f = |s: &str| match s {
-					"dir" => file.is_dir(),
-					"hidden" => file.is_hidden(),
-					"link" => file.is_link(),
-					"orphan" => file.is_orphan(),
-					"dummy" => file.is_dummy(),
-					"block" => file.is_block(),
-					"char" => file.is_char(),
-					"fifo" => file.is_fifo(),
-					"sock" => file.is_sock(),
-					"exec" => file.is_exec(),
-					"sticky" => file.is_sticky(),
-					_ => {
-						if let Some(rest) = s.strip_prefix("tag:").or_else(|| s.strip_prefix("tag=")) {
-							seen_tag.set(true);
-							let needle = rest.trim_matches(['"', '\\']).to_ascii_lowercase();
-							let tags = file.tags();
-							tags.iter().any(|t| t.eq_ignore_ascii_case(&needle))
-						} else { false }
-					}
-				};
-				if c.eval(f) == Some(true) && seen_tag.get() {
-					return Some(i);
-				}
-			}
+		if self.tag_override.get()
+			&& let Some(i) = self.conds.matches_tagged(file, hovered)
+		{
+			return Some(i);
 		}
-		if let Some(i) = self.match_by_glob(file) {
+		if let Some(i) = self.globs.matches(file) {
 			return Some(i);
 		}
 
-		if let Some(i) = self.match_by_name(file) {
-			return Some(i);
+		let name = file.name().unwrap_or_default();
+		match file.is_dir() {
+			true if let Some(i) = self.dirs.matches(name) => Some(i),
+			false if let Some(i) = self.files.matches(name) => Some(i),
+			false if let Some(i) = self.exts.matches(file.url.ext().unwrap_or_default()) => Some(i),
+			_ => self.conds.matches(file, hovered),
 		}
-
-        let f = |s: &str| {
-            match s {
-                "dir" => file.is_dir(),
-                "hidden" => file.is_hidden(),
-                "link" => file.is_link(),
-                "orphan" => file.is_orphan(),
-                "dummy" => file.is_dummy(),
-                "block" => file.is_block(),
-                "char" => file.is_char(),
-                "fifo" => file.is_fifo(),
-                "sock" => file.is_sock(),
-                "exec" => file.is_exec(),
-                "sticky" => file.is_sticky(),
-                _ => {
-                    // Tag condition: allow terms like "tag:Red" or "tag=red"
-                    if let Some(rest) = s.strip_prefix("tag:").or_else(|| s.strip_prefix("tag=")) {
-                        let needle = rest.trim_matches(['"', '\\']).to_ascii_lowercase();
-                        let tags = file.tags();
-                        tags.iter().any(|t| t.eq_ignore_ascii_case(&needle))
-                    } else {
-                        false
-                    }
-                }
-            }
-        };
-		self.conds.iter().find(|(c, _)| c.eval(f) == Some(true)).map(|(_, i)| i)
-	}
-
-	fn match_by_glob(&self, file: &File) -> Option<&I> {
-		self.globs.iter().find(|(p, _)| p.match_url(&file.url, file.is_dir())).map(|(_, i)| i)
-	}
-
-	fn match_by_name(&self, file: &File) -> Option<&I> {
-		let name = file.name()?.to_str()?;
-		if file.is_dir() {
-			self.dirs.get(name).or_else(|| self.dirs.get(&name.to_ascii_lowercase()))
-		} else {
-			self
-				.files
-				.get(name)
-				.or_else(|| self.files.get(&name.to_ascii_lowercase()))
-				.or_else(|| self.match_by_ext(file))
-		}
-	}
-
-	fn match_by_ext(&self, file: &File) -> Option<&I> {
-		let ext = file.url.ext()?.to_str()?;
-		self.exts.get(ext).or_else(|| self.exts.get(&ext.to_ascii_lowercase()))
 	}
 }
 
-impl Icon {
-	pub(crate) fn reshape(self) -> Result<Self> {
+impl DeserializeOverHook for Icon {
+	fn deserialize_over_hook(self) -> Result<Self, toml::de::Error> {
+		let dirs: HashMap<NonEmptyString, I> = self
+			.append_dirs
+			.into_iter()
+			.chain(self.dirs.unwrap_unchecked())
+			.chain(self.prepend_dirs)
+			.collect();
+		let files: HashMap<NonEmptyString, I> = self
+			.append_files
+			.into_iter()
+			.chain(self.files.unwrap_unchecked())
+			.chain(self.prepend_files)
+			.collect();
+		let exts: HashMap<NonEmptyString, I> = self
+			.append_exts
+			.into_iter()
+			.chain(self.exts.unwrap_unchecked())
+			.chain(self.prepend_exts)
+			.collect();
+
 		Ok(Self {
 			tag_override: self.tag_override,
-			globs: PatIcons(
-				self.prepend_globs.0.into_iter().chain(self.globs.0).chain(self.append_globs.0).collect(),
-			),
-			dirs: StrIcons(
-				self.append_dirs.0.into_iter().chain(self.dirs.0).chain(self.prepend_dirs.0).collect(),
-			),
-			files: StrIcons(
-				self.append_files.0.into_iter().chain(self.files.0).chain(self.prepend_files.0).collect(),
-			),
-			exts: StrIcons(
-				self.append_exts.0.into_iter().chain(self.exts.0).chain(self.prepend_exts.0).collect(),
-			),
-			conds: CondIcons(
-				self.prepend_conds.0.into_iter().chain(self.conds.0).chain(self.append_conds.0).collect(),
-			),
+			globs: mix(self.prepend_globs, self.globs.unwrap_unchecked(), self.append_globs).into(),
+			dirs: dirs.into(),
+			files: files.into(),
+			exts: exts.into(),
+			conds: mix(self.prepend_conds, self.conds.unwrap_unchecked(), self.append_conds).into(),
 			..Default::default()
 		})
-	}
-}
-
-#[derive(Default)]
-pub struct PatIcons(Vec<(Pattern, I)>);
-
-impl Deref for PatIcons {
-	type Target = Vec<(Pattern, I)>;
-
-	fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl<'de> Deserialize<'de> for PatIcons {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		#[derive(Deserialize)]
-		struct Shadow {
-			name: Pattern,
-			text: String,
-			fg:   Option<Color>,
-		}
-
-		Ok(Self(
-			<Vec<Shadow>>::deserialize(deserializer)?
-				.into_iter()
-				.map(|s| (s.name, I { text: s.text, style: Style { fg: s.fg, ..Default::default() } }))
-				.collect(),
-		))
-	}
-}
-
-#[derive(Default)]
-pub struct StrIcons(HashMap<String, I>);
-
-impl Deref for StrIcons {
-	type Target = HashMap<String, I>;
-
-	fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl<'de> Deserialize<'de> for StrIcons {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		#[derive(Deserialize)]
-		struct Shadow {
-			name: String,
-			text: String,
-			fg:   Option<Color>,
-		}
-
-		Ok(Self(
-			<Vec<Shadow>>::deserialize(deserializer)?
-				.into_iter()
-				.map(|s| (s.name, I { text: s.text, style: Style { fg: s.fg, ..Default::default() } }))
-				.collect(),
-		))
-	}
-}
-
-#[derive(Default)]
-pub struct CondIcons(Vec<(Condition, I)>);
-
-impl Deref for CondIcons {
-	type Target = Vec<(Condition, I)>;
-
-	fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl<'de> Deserialize<'de> for CondIcons {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		#[derive(Deserialize)]
-		struct Shadow {
-			r#if: Condition,
-			text: String,
-			fg:   Option<Color>,
-		}
-
-		Ok(Self(
-			<Vec<Shadow>>::deserialize(deserializer)?
-				.into_iter()
-				.map(|s| (s.r#if, I { text: s.text, style: Style { fg: s.fg, ..Default::default() } }))
-				.collect(),
-		))
 	}
 }

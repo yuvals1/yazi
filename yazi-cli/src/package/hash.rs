@@ -1,41 +1,31 @@
 use anyhow::{Context, Result, bail};
 use twox_hash::XxHash3_128;
-use yazi_fs::{ok_or_not_found, provider::local::Local};
+use yazi_fs::engine::local::Local;
+use yazi_macro::ok_or_not_found;
 
 use super::Dependency;
 
 impl Dependency {
 	pub(crate) async fn hash(&self) -> Result<String> {
 		let dir = self.target();
-		let files = if self.is_flavor {
-			&[
-				"LICENSE",
-				"LICENSE-tmtheme",
-				"README.md",
-				"filestyle.toml",
-				"flavor.toml",
-				"preview.png",
-				"tmtheme.xml",
-			][..]
-		} else {
-			&["LICENSE", "README.md", "main.lua"][..]
-		};
+		let files =
+			if self.is_flavor { Self::flavor_files() } else { Self::plugin_files(&dir).await? };
 
 		let mut h = XxHash3_128::new();
-		for &file in files {
+		for file in files {
 			h.write(file.as_bytes());
 			h.write(b"VpvFw9Atb7cWGOdqhZCra634CcJJRlsRl72RbZeV0vpG1\0");
-			h.write(&ok_or_not_found(Local::read(dir.join(file)).await)?);
+			h.write(&ok_or_not_found!(Local::regular(&dir.join(file)).read().await));
 		}
 
 		let mut assets = vec![];
-		match Local::read_dir(dir.join("assets")).await {
+		match tokio::fs::read_dir(dir.join("assets")).await {
 			Ok(mut it) => {
-				while let Some(entry) = it.next_entry().await? {
-					let Ok(name) = entry.file_name().into_string() else {
-						bail!("asset path is not valid UTF-8: {}", entry.path().display());
+				while let Some(dent) = it.next_entry().await? {
+					let Ok(name) = dent.file_name().into_string() else {
+						bail!("asset path is not valid UTF-8: {}", dent.path().display());
 					};
-					assets.push((name, Local::read(entry.path()).await?));
+					assets.push((name, Local::regular(&dent.path()).read().await?));
 				}
 			}
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -56,7 +46,7 @@ impl Dependency {
 		if self.hash != self.hash().await? {
 			bail!(
 				"You have modified the contents of the `{}` {}. For safety, the operation has been aborted.
-Please manually delete it from `{}` and re-run the command.",
+Please manually delete it from `{}` and re-run the command, or use `--discard` to discard those local changes.",
 				self.name,
 				if self.is_flavor { "flavor" } else { "plugin" },
 				self.target().display()

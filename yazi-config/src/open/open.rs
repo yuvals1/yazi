@@ -4,13 +4,15 @@ use anyhow::Result;
 use indexmap::IndexSet;
 use serde::Deserialize;
 use yazi_codegen::DeserializeOver2;
-use yazi_shared::{MIME_DIR, url::UrlBuf};
+use yazi_fs::{cha::ChaType, file::File};
+use yazi_shared::url::AsUrl;
+use yazi_shim::toml::DeserializeOverHook;
 
-use crate::{Preset, open::OpenRule};
+use crate::{mix, open::{OpenRule, OpenRuleArc, OpenRules}};
 
 #[derive(Default, Deserialize, DeserializeOver2)]
 pub struct Open {
-	rules:         Vec<OpenRule>,
+	rules:         OpenRules,
 	#[serde(default)]
 	prepend_rules: Vec<OpenRule>,
 	#[serde(default)]
@@ -18,57 +20,57 @@ pub struct Open {
 }
 
 impl Deref for Open {
-	type Target = Vec<OpenRule>;
+	type Target = OpenRules;
 
 	fn deref(&self) -> &Self::Target { &self.rules }
 }
 
 impl Open {
-	pub fn all<'a, 'b, P, M>(&'a self, url: P, mime: M) -> impl Iterator<Item = &'a str> + 'b
-	where
-		'a: 'b,
-		P: AsRef<UrlBuf> + 'b,
-		M: AsRef<str> + 'b,
-	{
-		let is_dir = mime.as_ref() == MIME_DIR;
-		self
-			.rules
-			.iter()
-			.filter(move |&r| {
-				r.mime.as_ref().is_some_and(|p| p.match_mime(&mime))
-					|| r.url.as_ref().is_some_and(|p| p.match_url(&url, is_dir))
-			})
-			.flat_map(|r| &r.r#use)
-			.map(String::as_str)
+	pub fn match_common(&self, targets: &[(File, &str)]) -> IndexSet<String> {
+		let mut targets = targets.iter();
+		let Some((file, mime)) = targets.next() else { return Default::default() };
+		let Some(first) = self.matches(file, mime) else { return Default::default() };
+
+		let mut common: IndexSet<_> = first.r#use.iter().cloned().collect();
+		for (file, mime) in targets {
+			let Some(rule) = self.matches(file, mime) else { return Default::default() };
+
+			common.retain(|name| rule.r#use.contains(name));
+			if common.is_empty() {
+				break;
+			}
+		}
+		common
 	}
 
-	pub fn common<'a>(
-		&'a self,
-		targets: &[(impl AsRef<UrlBuf>, impl AsRef<str>)],
-	) -> IndexSet<&'a str> {
-		let each: Vec<IndexSet<&str>> = targets
-			.iter()
-			.map(|(u, m)| self.all(u, m).collect::<IndexSet<_>>())
-			.filter(|s| !s.is_empty())
-			.collect();
+	pub fn match_dummy<U, M>(&self, url: U, mime: M) -> Option<OpenRuleArc>
+	where
+		U: AsUrl,
+		M: AsRef<str>,
+	{
+		let mime = mime.as_ref();
 
-		let mut flat: IndexSet<_> = each.iter().flatten().copied().collect();
-		flat.retain(|use_| each.iter().all(|e| e.contains(use_)));
-		flat
+		let is_dir = match mime.rsplit_once('/') {
+			Some((_, last)) if last.is_empty() => false,
+			Some(("folder", _)) => true,
+			Some((rest, _)) => rest.ends_with("/folder"),
+			None => false,
+		};
+
+		let file = File::from_dummy(
+			url.as_url().to_owned(),
+			Some(if is_dir { ChaType::Dir } else { ChaType::File }),
+		);
+
+		self.matches(&file, mime)
 	}
 }
 
-impl Open {
-	pub(crate) fn reshape(self) -> Result<Self> {
-		let any_file = self.append_rules.iter().any(|r| r.any_file());
-		let any_dir = self.append_rules.iter().any(|r| r.any_dir());
+impl DeserializeOverHook for Open {
+	fn deserialize_over_hook(self) -> Result<Self, toml::de::Error> {
+		let rules: Vec<OpenRuleArc> =
+			mix(self.prepend_rules, self.rules.unwrap_unchecked(), self.append_rules);
 
-		let it =
-			self.rules.into_iter().filter(|r| !(any_file && r.any_file() || any_dir && r.any_dir()));
-
-		Ok(Self {
-			rules: Preset::mix(self.prepend_rules, it, self.append_rules).collect(),
-			..Default::default()
-		})
+		Ok(Self { rules: rules.into(), ..Default::default() })
 	}
 }

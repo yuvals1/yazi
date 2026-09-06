@@ -1,20 +1,20 @@
 use anyhow::{Result, bail};
 use yazi_macro::{act, render, render_and, succ};
-use yazi_parser::{VoidOpt, mgr::EscapeOpt};
-use yazi_proxy::AppProxy;
-use yazi_shared::event::Data;
+use yazi_parser::{VoidForm, mgr::EscapeForm};
+use yazi_scheduler::NotifyProxy;
+use yazi_shared::{data::Data, url::UrlLike};
 
 use crate::{Actor, Ctx};
 
 pub struct Escape;
 
 impl Actor for Escape {
-	type Options = EscapeOpt;
+	type Form = EscapeForm;
 
 	const NAME: &str = "escape";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		if opt.is_empty() {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
+		if form.is_empty() {
 			_ = act!(mgr:escape_find, cx)? != false
 				|| act!(mgr:escape_visual, cx)? != false
 				|| act!(mgr:escape_filter, cx)? != false
@@ -23,19 +23,19 @@ impl Actor for Escape {
 			succ!();
 		}
 
-		if opt.contains(EscapeOpt::FIND) {
+		if form.contains(EscapeForm::FIND) {
 			act!(mgr:escape_find, cx)?;
 		}
-		if opt.contains(EscapeOpt::VISUAL) {
+		if form.contains(EscapeForm::VISUAL) {
 			act!(mgr:escape_visual, cx)?;
 		}
-		if opt.contains(EscapeOpt::FILTER) {
+		if form.contains(EscapeForm::FILTER) {
 			act!(mgr:escape_filter, cx)?;
 		}
-		if opt.contains(EscapeOpt::SELECT) {
+		if form.contains(EscapeForm::SELECT) {
 			act!(mgr:escape_select, cx)?;
 		}
-		if opt.contains(EscapeOpt::SEARCH) {
+		if form.contains(EscapeForm::SEARCH) {
 			act!(mgr:escape_search, cx)?;
 		}
 		succ!();
@@ -46,11 +46,11 @@ impl Actor for Escape {
 pub struct EscapeFind;
 
 impl Actor for EscapeFind {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "escape_find";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		succ!(render_and!(cx.tab_mut().finder.take().is_some()))
 	}
 }
@@ -59,24 +59,25 @@ impl Actor for EscapeFind {
 pub struct EscapeVisual;
 
 impl Actor for EscapeVisual {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "escape_visual";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		let tab = cx.tab_mut();
 
 		let select = tab.mode.is_select();
-		let Some((_, indices)) = tab.mode.take_visual() else { succ!(false) };
+		let Some(indices) = tab.mode.take_visual(tab.current.cursor, tab.current.entries.len()) else {
+			succ!(false)
+		};
 
 		render!();
-		let urls: Vec<_> =
-			indices.into_iter().filter_map(|i| tab.current.files.get(i)).map(|f| &f.url).collect();
+		let files: Vec<_> = indices.into_iter().filter_map(|i| tab.current.entries.get(i)).collect();
 
 		if !select {
-			tab.selected.remove_many(urls);
-		} else if urls.len() != tab.selected.add_many(urls) {
-			AppProxy::notify_warn(
+			tab.selected.remove_many(files);
+		} else if files.len() != tab.selected.add_many(files) {
+			NotifyProxy::push_warn(
 				"Escape visual mode",
 				"Some files cannot be selected, due to path nesting conflict.",
 			);
@@ -91,12 +92,12 @@ impl Actor for EscapeVisual {
 pub struct EscapeFilter;
 
 impl Actor for EscapeFilter {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "escape_filter";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
-		if cx.current_mut().files.filter().is_none() {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
+		if cx.current_mut().entries.filter().is_none() {
 			succ!(false);
 		}
 
@@ -110,11 +111,11 @@ impl Actor for EscapeFilter {
 pub struct EscapeSelect;
 
 impl Actor for EscapeSelect {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "escape_select";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		let tab = cx.tab_mut();
 		if tab.selected.is_empty() {
 			succ!(false);
@@ -134,11 +135,11 @@ impl Actor for EscapeSelect {
 pub struct EscapeSearch;
 
 impl Actor for EscapeSearch {
-	type Options = VoidOpt;
+	type Form = VoidForm;
 
 	const NAME: &str = "escape_search";
 
-	fn act(cx: &mut Ctx, _: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, _: Self::Form) -> Result<Data> {
 		let b = cx.cwd().is_search();
 		act!(mgr:search_stop, cx)?;
 		succ!(render_and!(b));

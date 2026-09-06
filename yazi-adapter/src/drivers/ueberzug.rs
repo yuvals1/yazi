@@ -1,28 +1,30 @@
-use std::{path::{Path, PathBuf}, process::Stdio};
+use std::{path::PathBuf, process::Stdio};
 
 use anyhow::{Result, bail};
 use image::ImageReader;
-use ratatui::layout::Rect;
+use ratatui_core::layout::Rect;
 use tokio::{io::AsyncWriteExt, process::{Child, Command}, sync::mpsc::{self, UnboundedSender}};
-use tracing::{debug, warn};
 use yazi_config::YAZI;
-use yazi_shared::{LOG_LEVEL, RoCell, env_exists};
+use yazi_emulator::Dimension;
+use yazi_macro::{debug, warn};
+use yazi_shared::env_exists;
+use yazi_shim::{cell::RoCell, log::LOG_LEVEL, strum::IntoStr};
 
-use crate::{Adapter, Dimension};
+use crate::{ADAPTOR, drivers::Driver};
 
 type Cmd = Option<(PathBuf, Rect)>;
 
 static DEMON: RoCell<Option<UnboundedSender<Cmd>>> = RoCell::new();
 
-pub(crate) struct Ueberzug;
+pub(super) struct Ueberzug;
 
 impl Ueberzug {
-	pub(crate) fn start(adapter: Adapter) {
-		if !adapter.needs_ueberzug() {
+	pub(super) fn start(driver: Driver) {
+		if !driver.needs_ueberzug() {
 			return DEMON.init(None);
 		}
 
-		let mut child = Self::create_demon(adapter).ok();
+		let mut child = Self::create_demon(driver).ok();
 		let (tx, mut rx) = mpsc::unbounded_channel();
 
 		tokio::spawn(async move {
@@ -32,24 +34,23 @@ impl Ueberzug {
 					child = None;
 				}
 				if child.is_none() {
-					child = Self::create_demon(adapter).ok();
+					child = Self::create_demon(driver).ok();
 				}
 				if let Some(c) = &mut child {
-					Self::send_command(adapter, c, cmd).await.ok();
+					Self::send_command(driver, c, cmd).await.ok();
 				}
 			}
 		});
 		DEMON.init(Some(tx))
 	}
 
-	pub(crate) async fn image_show(path: &Path, max: Rect) -> Result<Rect> {
+	pub(super) async fn image_show(path: PathBuf, max: Rect) -> Result<Rect> {
 		let Some(tx) = &*DEMON else {
 			bail!("uninitialized ueberzugpp");
 		};
 
-		let p = path.to_owned();
-		let (w, h) = tokio::task::spawn_blocking(move || {
-			ImageReader::open(p)?.with_guessed_format()?.into_dimensions()
+		let (w, h, path) = tokio::task::spawn_blocking(move || {
+			ImageReader::open(&path)?.with_guessed_format()?.into_dimensions().map(|(w, h)| (w, h, path))
 		})
 		.await??;
 
@@ -62,12 +63,12 @@ impl Ueberzug {
 			})
 			.unwrap_or(max);
 
-		tx.send(Some((path.to_owned(), area)))?;
-		Adapter::shown_store(area);
+		tx.send(Some((path, area)))?;
+		ADAPTOR.shown_store(area);
 		Ok(area)
 	}
 
-	pub(crate) fn image_erase(_: Rect) -> Result<()> {
+	pub(super) fn image_erase(_: Rect) -> Result<()> {
 		if let Some(tx) = &*DEMON {
 			Ok(tx.send(None)?)
 		} else {
@@ -75,18 +76,19 @@ impl Ueberzug {
 		}
 	}
 
-	// Currently Überzug++'s Wayland output only supports Sway, Hyprland and Wayfire
-	// as it requires information from specific compositor socket directly.
+	// Currently Überzug++'s Wayland output only supports Niri, Sway, Hyprland and
+	// Wayfire as it requires information from specific compositor socket directly.
 	// These environment variables are from ueberzugpp src/canvas/wayland/config.cpp
-	pub(crate) fn supported_compositor() -> bool {
-		env_exists("SWAYSOCK")
+	pub(super) fn supported_compositor() -> bool {
+		env_exists("NIRI_SOCKET")
+			|| env_exists("SWAYSOCK")
 			|| env_exists("HYPRLAND_INSTANCE_SIGNATURE")
 			|| env_exists("WAYFIRE_SOCKET")
 	}
 
-	fn create_demon(adapter: Adapter) -> Result<Child> {
+	fn create_demon(driver: Driver) -> Result<Child> {
 		let result = Command::new("ueberzugpp")
-			.args(["layer", "-so", &adapter.to_string()])
+			.args(["layer", "-so", driver.into_str()])
 			.env("SPDLOG_LEVEL", if LOG_LEVEL.get().is_none() { "" } else { "debug" })
 			.kill_on_drop(true)
 			.stdin(Stdio::piped())
@@ -111,7 +113,7 @@ impl Ueberzug {
 		rect
 	}
 
-	async fn send_command(adapter: Adapter, child: &mut Child, cmd: Cmd) -> Result<()> {
+	async fn send_command(driver: Driver, child: &mut Child, cmd: Cmd) -> Result<()> {
 		let s = if let Some((path, rect)) = cmd {
 			debug!("ueberzugpp rect before adjustment: {:?}", rect);
 			let rect = Self::adjust_rect(rect);
@@ -130,7 +132,7 @@ impl Ueberzug {
 			format!(r#"{{"action":"remove","identifier":"yazi"}}{}"#, '\n')
 		};
 
-		debug!("`ueberzugpp layer -so {adapter}` command: {s}");
+		debug!("`ueberzugpp layer -so {driver}` command: {s}");
 		child.stdin.as_mut().unwrap().write_all(s.as_bytes()).await?;
 
 		Ok(())

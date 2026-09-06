@@ -1,6 +1,8 @@
-use ratatui::{buffer::Buffer, layout, layout::{Constraint, Rect}, widgets::{Block, Widget}};
+use ratatui_core::{buffer::Buffer, layout::{Constraint, Layout, Rect}, widgets::Widget};
+use ratatui_widgets::{block::Block, borders::BorderType};
 use yazi_config::THEME;
 use yazi_core::Core;
+use yazi_widgets::clear::Clear;
 
 use super::Cand;
 
@@ -22,7 +24,7 @@ impl Widget for Which<'_> {
 			return;
 		}
 
-		let cols = THEME.which.cols as usize;
+		let cols = THEME.which.cols.get() as usize;
 		let height = area.height.min(which.cands.len().div_ceil(cols) as u16 + PADDING_Y * 2);
 		let area = Rect {
 			x: PADDING_X.min(area.width),
@@ -36,26 +38,31 @@ impl Widget for Which<'_> {
 			return;
 		}
 
+		Clear::default().render(area, buf);
+		let block = Block::bordered()
+			.style(THEME.which.mask.get())
+			.border_type(BorderType::Rounded)
+			.border_style(THEME.which.border.get());
+		block.as_ref().render(area, buf);
+
+		let inner = block.inner(area);
 		let chunks = {
 			use Constraint::*;
-			layout::Layout::horizontal(match cols {
+			Layout::horizontal(match cols {
 				1 => &[Ratio(1, 1)][..],
 				2 => &[Ratio(1, 2), Ratio(1, 2)],
 				_ => &[Ratio(1, 3), Ratio(1, 3), Ratio(1, 3)],
 			})
-			.split(area)
+			.split(inner)
 		};
 
-		yazi_binding::elements::Clear::default().render(area, buf);
-		Block::new().style(THEME.which.mask).render(area, buf);
-
-		for y in 0..area.height {
+		for y in 0..inner.height {
 			for (x, chunk) in chunks.iter().enumerate() {
 				let Some(cand) = which.cands.get(y as usize * cols + x) else {
 					break;
 				};
 
-				Cand::new(cand, which.times).render(Rect { y: chunk.y + y + 1, height: 1, ..*chunk }, buf);
+				Cand::new(cand, which.times).render(Rect { y: chunk.y + y, height: 1, ..*chunk }, buf);
 			}
 		}
 	}

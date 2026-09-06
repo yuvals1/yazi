@@ -1,12 +1,13 @@
-use anyhow::{Result, bail};
-use serde::Deserialize;
-use yazi_codegen::DeserializeOver2;
-use yazi_fs::{CWD, SortBy};
-use yazi_shared::{SyncCell, url::UrlBuf};
+use anyhow::Result;
+use arc_swap::ArcSwap;
+use serde::{Deserialize, Deserializer, de};
+use yazi_codegen::{DeserializeOver, DeserializeOver2};
+use yazi_fs::{SortBy, SortFallback};
+use yazi_shim::{arc_swap::IntoPointee, cell::SyncCell};
 
 use super::{MgrRatio, MouseEvents};
 
-#[derive(Debug, Deserialize, DeserializeOver2)]
+#[derive(Debug, Deserialize, DeserializeOver, DeserializeOver2)]
 pub struct Mgr {
 	pub ratio: SyncCell<MgrRatio>,
 
@@ -16,37 +17,25 @@ pub struct Mgr {
 	pub sort_reverse:   SyncCell<bool>,
 	pub sort_dir_first: SyncCell<bool>,
 	pub sort_translit:  SyncCell<bool>,
+	pub sort_fallback:  SyncCell<SortFallback>,
 
 	// Display
-	pub linemode:     String,
+	#[serde(deserialize_with = "deserialize_linemode")]
+	pub linemode:     ArcSwap<String>,
 	pub show_hidden:  SyncCell<bool>,
 	pub show_symlink: SyncCell<bool>,
 	pub scrolloff:    SyncCell<u8>,
 	pub mouse_events: SyncCell<MouseEvents>,
-	pub title_format: String,
 }
 
-impl Mgr {
-	pub fn title(&self) -> Option<String> {
-		if self.title_format.is_empty() {
-			return None;
-		}
-
-		let home = UrlBuf::from(dirs::home_dir().unwrap_or_default());
-		let cwd = if let Some(u) = CWD.load().strip_prefix(&home) {
-			format!("~{}{}", std::path::MAIN_SEPARATOR, u.display())
-		} else {
-			format!("{}", CWD.load().display())
-		};
-
-		Some(self.title_format.replace("{cwd}", &cwd))
+fn deserialize_linemode<'de, D>(deserializer: D) -> Result<ArcSwap<String>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	let s = String::deserialize(deserializer)?;
+	if s.is_empty() || s.len() > 20 {
+		return Err(de::Error::custom("linemode must be between 1 and 20 characters."));
 	}
 
-	pub(crate) fn reshape(self) -> Result<Self> {
-		if self.linemode.is_empty() || self.linemode.len() > 20 {
-			bail!("[mgr].linemode must be between 1 and 20 characters.");
-		}
-
-		Ok(self)
-	}
+	Ok(s.into_pointee())
 }

@@ -1,40 +1,18 @@
-use std::ops::Deref;
-
 use serde::Deserialize;
-use yazi_codegen::DeserializeOver2;
-use yazi_fs::File;
+use yazi_binding::style::StyleFlat;
+use yazi_codegen::{DeserializeOver, DeserializeOver2, Overlay};
+use yazi_fs::file::File;
 
-use super::Is;
-use crate::{Pattern, Style};
+use super::FiletypeRules;
+use crate::Selectable;
 
-#[derive(Deserialize, DeserializeOver2)]
+#[derive(Deserialize, DeserializeOver, DeserializeOver2, Overlay)]
 pub struct Filetype {
-	rules: Vec<FiletypeRule>,
+	rules: FiletypeRules,
 }
 
-impl Deref for Filetype {
-	type Target = Vec<FiletypeRule>;
-
-	fn deref(&self) -> &Self::Target { &self.rules }
-}
-
-#[derive(Deserialize)]
-pub struct FiletypeRule {
-	#[serde(default)]
-	is:        Is,
-	url:       Option<Pattern>,
-	mime:      Option<Pattern>,
-	#[serde(flatten)]
-	pub style: Style,
-}
-
-impl FiletypeRule {
-	pub fn matches(&self, file: &File, mime: &str) -> bool {
-		if !self.is.check(&file.cha) {
-			return false;
-		}
-
-		self.mime.as_ref().is_some_and(|p| p.match_mime(mime))
-			|| self.url.as_ref().is_some_and(|n| n.match_url(&file.url, file.is_dir()))
+impl Filetype {
+	pub fn match_style(&self, file: &File, mime: &str) -> Option<StyleFlat> {
+		self.rules.load().iter().find(|rule| rule.matches(file, mime)).map(|rule| rule.style)
 	}
 }

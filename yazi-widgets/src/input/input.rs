@@ -1,24 +1,58 @@
 use std::{borrow::Cow, ops::Range};
 
-use crossterm::cursor::SetCursorStyle;
-use yazi_config::YAZI;
+use anyhow::Result;
+use ratatui_core::layout::{Rect, Size};
+use yazi_macro::act;
+use yazi_shared::id::Ids;
+use yazi_shim::path::CROSS_SEPARATOR;
+use yazi_tty::sequence::SetCursorStyle;
 
-use super::{InputSnap, InputSnaps, mode::InputMode, op::InputOp};
-use crate::CLIPBOARD;
+use super::{InputHistory, InputSnap, InputSnaps, mode::InputMode, op::InputOp};
+use crate::{CLIPBOARD, input::{InputCallback, InputEvent, InputOpt, InputStyles}};
 
-pub type InputCallback = Box<dyn Fn(&str, &str)>;
-
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Input {
-	pub snaps:    InputSnaps,
-	pub limit:    usize,
-	pub obscure:  bool,
-	pub callback: Option<InputCallback>,
+	pub(crate) size:    Size,
+	pub(crate) snaps:   InputSnaps,
+	pub history:        InputHistory,
+	pub(crate) styles:  InputStyles,
+	pub(crate) obscure: bool,
+	realtime:           bool,
+	completion:         bool,
+
+	pub cb:     Option<Box<dyn InputCallback>>,
+	pub ticket: Ids,
 }
 
 impl Input {
-	pub fn new(value: String, limit: usize, obscure: bool, callback: InputCallback) -> Self {
-		Self { snaps: InputSnaps::new(value, obscure, limit), limit, obscure, callback: Some(callback) }
+	pub fn new(opt: InputOpt) -> Result<Self> {
+		let mut input = Self {
+			snaps: InputSnaps::new(opt.value, opt.obscure),
+			history: InputHistory::new(opt.history),
+			styles: opt.styles,
+			obscure: opt.obscure,
+			realtime: opt.realtime,
+			completion: opt.completion,
+
+			cb: opt.cb,
+			..Default::default()
+		};
+
+		if let Some(cursor) = opt.cursor {
+			input.snap_mut().cursor = cursor;
+			act!(r#move, input)?;
+		}
+
+		Ok(input)
+	}
+
+	pub fn repos(&mut self, area: Rect) {
+		let size = area.into();
+
+		if self.size != size {
+			self.size = size;
+			self.snap_mut().resize(size.width as usize);
+		}
 	}
 
 	pub(super) fn handle_op(&mut self, cursor: usize, include: bool) -> bool {
@@ -57,76 +91,91 @@ impl Input {
 			return false;
 		}
 		if !matches!(old.op, InputOp::None | InputOp::Select(_)) {
-			self.snaps.tag(self.limit).then(|| self.flush_value());
+			self.snaps.tag(self.size.width as usize).then(|| self.flush_all());
 		}
 		true
 	}
 
-	pub(super) fn flush_value(&mut self) {
-		if let Some(cb) = &self.callback {
-			let (before, after) = self.partition();
-			cb(before, after);
+	pub(super) fn flush_all(&mut self) {
+		self.history.take();
+		self.flush_type();
+	}
+
+	pub(super) fn flush_type(&mut self) {
+		self.ticket.next();
+		if let Some(cb) = self.cb.as_ref().filter(|_| self.realtime) {
+			cb(InputEvent::Type(self.value().to_owned()));
+		}
+
+		self.flush_trigger(true);
+	}
+
+	pub(super) fn flush_trigger(&self, force: bool) {
+		if let Some(cb) = self.cb.as_ref().filter(|_| self.completion) {
+			cb(InputEvent::Trigger(
+				self.partition().0.to_owned(),
+				(!force).then_some(self.ticket.current()),
+			));
 		}
 	}
 }
 
 impl Input {
-	#[inline]
 	pub fn value(&self) -> &str { &self.snap().value }
 
-	#[inline]
-	pub fn display(&self) -> Cow<'_, str> {
+	pub(crate) fn display(&self) -> Cow<'_, str> {
 		if self.obscure {
-			"•".repeat(self.snap().window(self.limit).len()).into()
+			"•".repeat(self.snap().window(self.size.width as usize).len()).into()
 		} else {
-			self.snap().slice(self.snap().window(self.limit)).into()
+			self.snap().slice(self.snap().window(self.size.width as usize)).into()
 		}
 	}
 
-	#[inline]
 	pub fn mode(&self) -> InputMode { self.snap().mode }
 
-	#[inline]
 	pub fn cursor(&self) -> u16 { self.snap().width(self.snap().offset..self.snap().cursor) }
 
 	pub fn cursor_shape(&self) -> SetCursorStyle {
 		use InputMode as M;
 
+		let blink = self.styles.blink.unwrap_or(false);
 		match self.mode() {
-			M::Normal if YAZI.input.cursor_blink => SetCursorStyle::BlinkingBlock,
-			M::Normal if !YAZI.input.cursor_blink => SetCursorStyle::SteadyBlock,
-			M::Insert if YAZI.input.cursor_blink => SetCursorStyle::BlinkingBar,
-			M::Insert if !YAZI.input.cursor_blink => SetCursorStyle::SteadyBar,
-			M::Replace if YAZI.input.cursor_blink => SetCursorStyle::BlinkingUnderScore,
-			M::Replace if !YAZI.input.cursor_blink => SetCursorStyle::SteadyUnderScore,
+			M::Normal if blink => SetCursorStyle::BlinkingBlock,
+			M::Normal if !blink => SetCursorStyle::SteadyBlock,
+			M::Insert if blink => SetCursorStyle::BlinkingBar,
+			M::Insert if !blink => SetCursorStyle::SteadyBar,
+			M::Replace if blink => SetCursorStyle::BlinkingUnderline,
+			M::Replace if !blink => SetCursorStyle::SteadyUnderline,
 			M::Normal | M::Insert | M::Replace => unreachable!(),
 		}
 	}
 
-	pub fn selected(&self) -> Option<Range<u16>> {
+	pub(crate) fn selected(&self) -> Option<Range<u16>> {
 		let snap = self.snap();
 		let start = snap.op.start()?;
 
 		let (start, end) =
 			if start < snap.cursor { (start, snap.cursor) } else { (snap.cursor + 1, start + 1) };
 
-		let win = snap.window(self.limit);
+		let win = snap.window(self.size.width as usize);
 		let Range { start, end } = start.max(win.start)..end.min(win.end);
 
 		let s = snap.width(snap.offset..start);
 		Some(s..s + snap.width(start..end))
 	}
 
-	#[inline]
 	pub fn partition(&self) -> (&str, &str) {
 		let snap = self.snap();
 		let idx = snap.idx(snap.cursor).unwrap();
-		(&snap.value[..idx], &snap.value[idx..])
+
+		if let Some(sep) = snap.value[idx..].find(CROSS_SEPARATOR).map(|i| idx + i) {
+			(&snap.value[..sep], &snap.value[sep + 1..])
+		} else {
+			(&snap.value, "")
+		}
 	}
 
-	#[inline]
 	pub fn snap(&self) -> &InputSnap { self.snaps.current() }
 
-	#[inline]
-	pub fn snap_mut(&mut self) -> &mut InputSnap { self.snaps.current_mut() }
+	pub(crate) fn snap_mut(&mut self) -> &mut InputSnap { self.snaps.current_mut() }
 }

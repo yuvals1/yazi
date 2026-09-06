@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, widgets::Widget};
+use ratatui_core::{buffer::Buffer, widgets::Widget};
+use yazi_binding::elements::Spatial;
 use yazi_config::LAYOUT;
 use yazi_core::Core;
 
@@ -12,7 +13,7 @@ impl<'a> Preview<'a> {
 }
 
 impl Widget for Preview<'_> {
-	fn render(self, win: ratatui::layout::Rect, buf: &mut Buffer) {
+	fn render(self, win: ratatui_core::layout::Rect, buf: &mut Buffer) {
 		let Some(lock) = &self.core.active().preview.lock else {
 			return;
 		};
@@ -23,8 +24,8 @@ impl Widget for Preview<'_> {
 
 		for w in &lock.data {
 			let rect = w.area().transform(|p| self.core.mgr.area(p));
-			if win.intersects(rect) {
-				w.clone().render(rect, buf);
+			if rect.intersection(win) == rect {
+				w.render(rect, buf);
 			}
 		}
 	}

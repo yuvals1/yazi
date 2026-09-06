@@ -29,12 +29,7 @@ function Tasks:redraw()
 			break
 		end
 
-		elements[#elements + 1] = ui.Line({ self:icon(snap), snap.name }):area(ui.Rect {
-			x = self._area.x,
-			y = y,
-			w = self._area.w,
-			h = 1,
-		})
+		elements[#elements + 1] = ui.Line({ self:icon(snap), snap.title }):area(self._area { y = y, h = 1 })
 
 		if i == cx.tasks.cursor + 1 then
 			elements[#elements] = elements[#elements]:style(th.tasks.hovered)
@@ -62,60 +57,63 @@ function Tasks:redraw()
 end
 
 function Tasks:icon(snap)
-	if snap.prog.kind == "FilePaste" then
-		return "  "
+	if snap.prog.kind == "FileCopy" then
+		return "  "
+	elseif snap.prog.kind == "FileMove" then
+		return "  "
 	elseif snap.prog.kind == "FileDelete" then
 		return "  "
+	elseif snap.prog.kind == "FileDownload" then
+		return "  "
+	elseif snap.prog.kind == "FileUpload" then
+		return "  "
 	else
 		return "  "
 	end
 end
 
-function Tasks:progress_redraw(snap, y)
-	local kind = snap.prog.kind
-	if kind == "FilePaste" or kind == "FileDelete" then
-		local percent
-		if snap.cleaning then
-			percent = "Cleaning…"
-		else
-			percent = string.format("%3d%%", math.floor(snap.percent))
-		end
+function Tasks:progress(snap)
+	local p = snap.prog
 
-		local label = string.format(
-			"%s - %s / %s",
-			percent,
-			ya.readable_size(snap.prog.processed_bytes),
-			ya.readable_size(snap.prog.total_bytes)
-		)
+	local label, count, failed
+	if p.total_bytes then
+		local percent = snap.running and snap.cooked and "Cleaning…" or string.format("%3d%%", math.floor(snap.percent))
+		label = string.format("%s - %s / %s", percent, ya.readable_size(p.processed_bytes), ya.readable_size(p.total_bytes))
+		count = string.format("%d/%d", p.success_files, p.total_files)
+		count = p.failed_files == 0 and count or string.format("%s, %d failed", count, p.failed_files)
+		failed = snap.failed or p.failed_files > 0
+	elseif p.kind == "Custom" and snap.percent then
+		label = string.format("%3d%%", math.floor(snap.percent))
+		count = string.format("%d/%d", p.success, p.total)
+		count = p.failed == 0 and count or string.format("%s, %d failed", count, p.failed)
+		failed = snap.failed or p.failed > 0
+	end
 
-		local style = th.status.progress_normal
-		if snap.prog.failed_files > 0 then
-			style = th.status.progress_error
-		end
+	return label, count, failed
+end
 
-		return {
-			ui.Gauge()
-				:area(ui.Rect { x = self._chunks[1].x, y = y, w = self._chunks[1].w, h = 1 })
-				:percent(snap.percent)
-				:label(ui.Span(label):style(th.status.progress_label))
-				:gauge_style(style),
-
-			ui.Line(string.format("%d/%d", snap.prog.success_files, snap.prog.total_files))
-				:fg("gray")
-				:area(ui.Rect { x = self._chunks[2].x, y = y, w = self._chunks[2].w, h = 1 })
-				:align(ui.Align.RIGHT),
-		}
+function Tasks:status(snap)
+	if snap.running then
+		return snap.cooked and "Cleaning…" or "Running…"
 	else
-		local text
-		if snap.running then
-			text = "Running…"
-		elseif snap.success then
-			text = "Cleaning…"
-		else
-			text = "Failed, press Enter to view log…"
-		end
+		return "Failed, press Enter to view log…"
+	end
+end
+
+function Tasks:progress_redraw(snap, y)
+	local label, count, failed = self:progress(snap)
+	if not label then
 		return {
-			ui.Line(text):fg("gray"):area(ui.Rect { x = self._chunks[1].x, y = y, w = self._chunks[1].w, h = 1 }),
+			ui.Line(self:status(snap)):fg("gray"):area(self._chunks[1] { y = y, h = 1 }),
 		}
 	end
+
+	return {
+		ui.Gauge()
+			:area(self._chunks[1] { y = y, h = 1 })
+			:percent(snap.percent)
+			:label(ui.Span(label):style(th.status.progress_label))
+			:gauge_style(failed and th.status.progress_error or th.status.progress_normal),
+		ui.Line(count):fg("gray"):area(self._chunks[2] { y = y, h = 1 }):align(ui.Align.RIGHT),
+	}
 end

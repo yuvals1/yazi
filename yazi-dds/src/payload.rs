@@ -1,21 +1,24 @@
 use std::{fmt::Display, io::Write, str::FromStr};
 
 use anyhow::{Result, anyhow};
-use yazi_boot::BOOT;
-use yazi_macro::{emit, relay};
-use yazi_shared::Id;
+use mlua::{IntoLua, Lua, Value};
+use yazi_boot::{BOOT, ID};
+use yazi_macro::{emit, impl_data_any, relay};
+use yazi_shared::{event::ActionCow, id::Id};
 
-use crate::{ID, ember::Ember};
+use crate::ember::Ember;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Payload<'a> {
 	pub receiver: Id,
 	pub sender:   Id,
 	pub body:     Ember<'a>,
 }
 
+impl_data_any!(Payload<'static>);
+
 impl<'a> Payload<'a> {
-	pub(super) fn new(body: Ember<'a>) -> Self { Self { receiver: Id(0), sender: *ID, body } }
+	pub fn new(body: Ember<'a>) -> Self { Self { receiver: Id::ZERO, sender: *ID, body } }
 
 	pub(super) fn flush(&self) -> Result<()> {
 		writeln!(std::io::stdout(), "{self}")?;
@@ -45,10 +48,8 @@ impl<'a> Payload<'a> {
 }
 
 impl Payload<'static> {
-	pub(super) fn emit(self) -> Result<()> {
-		self.try_flush()?;
+	pub(super) fn emit(self) {
 		emit!(Call(relay!(app:accept_payload).with_any("payload", self)));
-		Ok(())
 	}
 }
 
@@ -76,6 +77,14 @@ impl<'a> From<Ember<'a>> for Payload<'a> {
 	fn from(value: Ember<'a>) -> Self { Self::new(value) }
 }
 
+impl TryFrom<ActionCow> for Payload<'_> {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		a.take_any2("payload").ok_or_else(|| anyhow!("Missing 'payload' in Payload"))?
+	}
+}
+
 impl Display for Payload<'_> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let result = match &self.body {
@@ -87,12 +96,16 @@ impl Display for Payload<'_> {
 			Ember::Hover(b) => serde_json::to_string(b),
 			Ember::Tab(b) => serde_json::to_string(b),
 			Ember::Rename(b) => serde_json::to_string(b),
-			Ember::Bulk(b) => serde_json::to_string(b),
+			Ember::BulkRename(b) => serde_json::to_string(b),
 			Ember::Yank(b) => serde_json::to_string(b),
+			Ember::Duplicate(b) => serde_json::to_string(b),
 			Ember::Move(b) => serde_json::to_string(b),
 			Ember::Trash(b) => serde_json::to_string(b),
 			Ember::Delete(b) => serde_json::to_string(b),
+			Ember::Download(b) => serde_json::to_string(b),
+			Ember::Input(b) => serde_json::to_string(b),
 			Ember::Mount(b) => serde_json::to_string(b),
+			Ember::Theme(b) => serde_json::to_string(b),
 			Ember::Custom(b) => serde_json::to_string(b),
 		};
 
@@ -101,5 +114,17 @@ impl Display for Payload<'_> {
 		} else {
 			Err(std::fmt::Error)
 		}
+	}
+}
+
+impl<'a> IntoLua for Payload<'a> {
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
+		lua
+			.create_table_from([
+				("receiver", self.receiver.into_lua(lua)?),
+				("sender", self.sender.into_lua(lua)?),
+				("body", self.body.into_lua(lua)?),
+			])?
+			.into_lua(lua)
 	}
 }

@@ -1,34 +1,36 @@
 [package]
-name        = "yazi-cli"
-version     = "25.6.11"
-edition     = "2024"
-license     = "MIT"
-authors     = [ "sxyazi <sxyazi@gmail.com>" ]
-description = "Yazi command-line interface"
-homepage    = "https://yazi-rs.github.io"
-repository  = "https://github.com/sxyazi/yazi"
+name                   = "yazi-cli"
+description            = "Yazi command-line interface"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
 
-[profile.release]
-codegen-units = 1
-lto           = true
-panic         = "abort"
-strip         = true
-
-[profile.release-windows]
-inherits = "release"
-panic    = "unwind"
+[lints]
+workspace = true
 
 [dependencies]
-yazi-boot   = { path = "../yazi-boot", version = "25.6.11" }
-yazi-dds    = { path = "../yazi-dds", version = "25.6.11" }
-yazi-fs     = { path = "../yazi-fs", version = "25.6.11" }
-yazi-macro  = { path = "../yazi-macro", version = "25.6.11" }
-yazi-shared = { path = "../yazi-shared", version = "25.6.11" }
+yazi-adapter  = { path = "../yazi-adapter", version = "26.9.1" }
+yazi-boot     = { path = "../yazi-boot", version = "26.9.1" }
+yazi-config   = { path = "../yazi-config", version = "26.9.1" }
+yazi-dds      = { path = "../yazi-dds", version = "26.9.1" }
+yazi-emulator = { path = "../yazi-emulator", version = "26.9.1" }
+yazi-fs       = { path = "../yazi-fs", version = "26.9.1" }
+yazi-macro    = { path = "../yazi-macro", version = "26.9.1" }
+yazi-shared   = { path = "../yazi-shared", version = "26.9.1" }
+yazi-shim     = { path = "../yazi-shim", version = "26.9.1" }
+yazi-term     = { path = "../yazi-term", version = "26.9.1" }
+yazi-tty      = { path = "../yazi-tty", version = "26.9.1" }
+yazi-version  = { path = "../yazi-version", version = "26.9.1" }
 
 # External dependencies
 anyhow     = { workspace = true }
 clap       = { workspace = true }
-crossterm  = { workspace = true }
+hashbrown  = { workspace = true }
+regex      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }
@@ -36,19 +38,16 @@ toml       = { workspace = true }
 twox-hash  = { workspace = true }
 
 [build-dependencies]
-yazi-shared = { path = "../yazi-shared", version = "25.6.11" }
+yazi-shared = { path = "../yazi-shared", version = "26.9.1" }
 
 # External build dependencies
 anyhow                = { workspace = true }
 clap                  = { workspace = true }
-clap_complete         = "4.5.57"
+clap_complete         = "4.6.9"
 clap_complete_fig     = "4.5.2"
-clap_complete_nushell = "4.5.8"
+clap_complete_nushell = "4.6.2"
+serde                 = { workspace = true }
 serde_json            = { workspace = true }
-vergen-gitcl          = { version = "1.0.8", features = [ "build" ] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }
 
 [[bin]]
 name = "ya"

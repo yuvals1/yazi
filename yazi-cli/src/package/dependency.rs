@@ -1,9 +1,10 @@
-use std::{io::BufWriter, path::PathBuf, str::FromStr};
+use std::{env, io, path::{Path, PathBuf}, str::FromStr};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use twox_hash::XxHash3_128;
 use yazi_fs::Xdg;
+use yazi_shared::BytesExt;
 
 #[derive(Clone, Default)]
 pub(crate) struct Dependency {
@@ -21,7 +22,7 @@ pub(crate) struct Dependency {
 
 impl Dependency {
 	pub(super) fn local(&self) -> PathBuf {
-		Xdg::state_dir()
+		Xdg::cache_dir()
 			.join("packages")
 			.join(format!("{:x}", XxHash3_128::oneshot(self.remote().as_bytes())))
 	}
@@ -44,20 +45,50 @@ impl Dependency {
 	}
 
 	pub(super) fn header(&self, s: &str) -> Result<()> {
-		use crossterm::style::{Attribute, Print, SetAttributes};
+		use std::io::IsTerminal;
 
-		crossterm::execute!(
-			BufWriter::new(std::io::stdout()),
-			Print("\n"),
-			SetAttributes(Attribute::Reverse.into()),
-			SetAttributes(Attribute::Bold.into()),
-			Print("  "),
-			Print(s.replacen("{name}", &self.name, 1)),
-			Print("  "),
-			SetAttributes(Attribute::Reset.into()),
-			Print("\n\n"),
+		use yazi_macro::writef;
+		use yazi_tty::sequence::{If, SetSgr};
+
+		let ansi = env::var_os("YA_FORCE_ANSI").is_some_and(|v| v == "1") || io::stdout().is_terminal();
+		writef!(
+			io::stdout(),
+			"\n{}{}{} {} {}{}\n\n",
+			If(ansi, SetSgr::Reverse),
+			If(ansi, SetSgr::Bold),
+			"  ",
+			s.replacen("{name}", &self.name, 1),
+			"  ",
+			If(ansi, SetSgr::Reset),
 		)?;
 		Ok(())
+	}
+
+	pub(super) async fn plugin_files(dir: &Path) -> Result<Vec<String>> {
+		let mut it = tokio::fs::read_dir(dir)
+			.await
+			.with_context(|| format!("failed to read plugin directory `{}`", dir.display()))?;
+
+		let mut files: Vec<String> =
+			["LICENSE", "README.md", "main.lua"].into_iter().map(Into::into).collect();
+		while let Some(dent) = it.next_entry().await? {
+			if let Ok(name) = dent.file_name().into_string()
+				&& let Some(stripped) = name.strip_suffix(".lua")
+				&& stripped != "main"
+				&& stripped.as_bytes().kebab_cased()
+			{
+				files.push(name);
+			}
+		}
+		files.sort_unstable();
+		Ok(files)
+	}
+
+	pub(super) fn flavor_files() -> Vec<String> {
+		["LICENSE", "LICENSE-tmtheme", "README.md", "flavor.toml", "preview.png", "tmtheme.xml"]
+			.into_iter()
+			.map(Into::into)
+			.collect()
 	}
 }
 
@@ -67,15 +98,15 @@ impl FromStr for Dependency {
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
 		let mut parts = s.splitn(2, ':');
 
-		let Some(parent) = parts.next() else { bail!("Package url cannot be empty") };
+		let Some(parent) = parts.next() else { bail!("Package URL cannot be empty") };
 		let child = parts.next().unwrap_or_default();
 
 		let Some((_, repo)) = parent.split_once('/') else {
-			bail!("Package url `{parent}` must be in the format `owner/repo`")
+			bail!("Package URL `{parent}` must be in the format `owner/repository`")
 		};
 
 		let name = if child.is_empty() { repo } else { child };
-		if !name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'-')) {
+		if !name.as_bytes().kebab_cased() {
 			bail!("Package name `{name}` must be in kebab-case")
 		}
 

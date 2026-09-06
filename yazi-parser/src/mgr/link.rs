@@ -1,20 +1,27 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::CmdCow;
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
 
-#[derive(Debug)]
-pub struct LinkOpt {
+#[derive(Debug, Deserialize)]
+pub struct LinkForm {
+	#[serde(default)]
 	pub relative: bool,
+	#[serde(default)]
 	pub force:    bool,
+	#[serde(default)]
+	pub follow:   bool,
 }
 
-impl From<CmdCow> for LinkOpt {
-	fn from(c: CmdCow) -> Self { Self { relative: c.bool("relative"), force: c.bool("force") } }
+impl TryFrom<ActionCow> for LinkForm {
+	type Error = anyhow::Error;
+
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl FromLua for LinkOpt {
+impl FromLua for LinkForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for LinkOpt {
+impl IntoLua for LinkForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

@@ -1,15 +1,19 @@
-use std::ops::{Deref, DerefMut};
+use std::{mem, ops::{Deref, DerefMut}};
 
 use anyhow::{Result, anyhow};
-use yazi_core::{Core, mgr::Tabs, tab::{Folder, Tab}, tasks::Tasks};
-use yazi_fs::File;
-use yazi_shared::{Source, event::Cmd, url::UrlBuf};
+use yazi_core::{Core, mgr::Tabs, tab::{Folder, Tab}};
+use yazi_fs::file::File;
+use yazi_shared::{Source, event::Action, id::Id, url::UrlBuf};
+use yazi_tui::Raterm;
 
 pub struct Ctx<'a> {
-	pub core:   &'a mut Core,
-	pub tab:    usize,
-	pub level:  usize,
-	pub source: Source,
+	pub(crate) core: &'a mut Core,
+	pub(crate) term: &'a mut Option<Raterm>,
+	pub(crate) tab:  usize,
+	pub level:       usize,
+	source:          Source,
+	#[cfg(debug_assertions)]
+	pub backtrace:   Vec<&'static str>,
 }
 
 impl Deref for Ctx<'_> {
@@ -23,85 +27,102 @@ impl DerefMut for Ctx<'_> {
 }
 
 impl<'a> Ctx<'a> {
-	#[inline]
-	pub fn new(core: &'a mut Core, cmd: &Cmd) -> Result<Self> {
-		let tab = if let Some(id) = cmd.id("tab") {
-			core
-				.mgr
-				.tabs
-				.iter()
-				.position(|t| t.id == id)
-				.ok_or_else(|| anyhow!("Tab with id {id} not found"))?
+	pub fn new(action: &Action, core: &'a mut Core, term: &'a mut Option<Raterm>) -> Result<Self> {
+		let tab = if let Ok(id) = action.get::<Id>("tab") {
+			core.mgr.tabs.idx(id).ok_or_else(|| anyhow!("Tab with id {id} not found"))?
 		} else {
 			core.mgr.tabs.cursor
 		};
 
-		Ok(Self { core, tab, level: 0, source: cmd.source })
+		Ok(Self {
+			core,
+			term,
+			tab,
+			level: 0,
+			source: action.source,
+			#[cfg(debug_assertions)]
+			backtrace: vec![],
+		})
 	}
 
-	#[inline]
-	pub fn renew<'b>(cx: &'a mut Ctx<'b>) -> Self {
+	pub(crate) fn with<F, T>(&mut self, tab: usize, f: F) -> T
+	where
+		F: FnOnce(&mut Self) -> T,
+	{
+		let prev = mem::replace(&mut self.tab, tab);
+		let result = f(self);
+		self.tab = prev;
+		result
+	}
+
+	pub(crate) fn renew<'b>(cx: &'a mut Ctx<'b>) -> Self {
 		let tab = cx.core.mgr.tabs.cursor;
-		Self { core: cx.core, tab, level: cx.level, source: cx.source }
+		Self {
+			core: cx.core,
+			term: cx.term,
+			tab,
+			level: cx.level,
+			source: cx.source,
+			#[cfg(debug_assertions)]
+			backtrace: vec![],
+		}
 	}
 
-	#[inline]
-	pub fn active(core: &'a mut Core) -> Self {
+	pub fn active(core: &'a mut Core, term: &'a mut Option<Raterm>) -> Self {
 		let tab = core.mgr.tabs.cursor;
-		Self { core, tab, level: 0, source: Source::Unknown }
+		Self {
+			core,
+			term,
+			tab,
+			level: 0,
+			source: Source::Unknown,
+			#[cfg(debug_assertions)]
+			backtrace: vec![],
+		}
 	}
 }
 
 impl<'a> Ctx<'a> {
 	#[inline]
-	pub fn tabs(&self) -> &Tabs { &self.mgr.tabs }
+	pub(crate) fn tabs(&self) -> &Tabs { &self.mgr.tabs }
 
 	#[inline]
-	pub fn tabs_mut(&mut self) -> &mut Tabs { &mut self.mgr.tabs }
+	pub(crate) fn tabs_mut(&mut self) -> &mut Tabs { &mut self.mgr.tabs }
 
 	#[inline]
-	pub fn tab(&self) -> &Tab { &self.tabs()[self.tab] }
+	pub(crate) fn tab(&self) -> &Tab { &self.tabs()[self.tab] }
 
 	#[inline]
-	pub fn tab_mut(&mut self) -> &mut Tab { &mut self.core.mgr.tabs[self.tab] }
+	pub(crate) fn tab_mut(&mut self) -> &mut Tab { &mut self.core.mgr.tabs[self.tab] }
 
 	#[inline]
-	pub fn cwd(&self) -> &UrlBuf { self.tab().cwd() }
+	pub(crate) fn cwd(&self) -> &UrlBuf { self.tab().cwd() }
 
 	#[inline]
-	pub fn parent(&self) -> Option<&Folder> { self.tab().parent.as_ref() }
+	pub(crate) fn parent(&self) -> Option<&Folder> { self.tab().parent.as_ref() }
 
 	#[inline]
-	pub fn parent_mut(&mut self) -> Option<&mut Folder> { self.tab_mut().parent.as_mut() }
+	pub(crate) fn parent_mut(&mut self) -> Option<&mut Folder> { self.tab_mut().parent.as_mut() }
 
 	#[inline]
-	pub fn current(&self) -> &Folder { &self.tab().current }
+	pub(crate) fn current(&self) -> &Folder { &self.tab().current }
 
 	#[inline]
-	pub fn current_mut(&mut self) -> &mut Folder { &mut self.tab_mut().current }
+	pub(crate) fn current_mut(&mut self) -> &mut Folder { &mut self.tab_mut().current }
 
 	#[inline]
-	pub fn hovered(&self) -> Option<&File> { self.tab().hovered() }
+	pub(crate) fn hovered(&self) -> Option<&File> { self.tab().hovered() }
 
 	#[inline]
-	pub fn hovered_folder(&self) -> Option<&Folder> { self.tab().hovered_folder() }
+	pub(crate) fn hovered_url(&self) -> Option<&UrlBuf> { self.tab().hovered_url() }
 
 	#[inline]
-	pub fn hovered_folder_mut(&mut self) -> Option<&mut Folder> {
+	pub(crate) fn hovered_folder(&self) -> Option<&Folder> { self.tab().hovered_folder() }
+
+	#[inline]
+	pub(crate) fn hovered_folder_mut(&mut self) -> Option<&mut Folder> {
 		self.tab_mut().hovered_folder_mut()
 	}
 
-	#[inline]
-	pub fn tasks(&self) -> &Tasks { &self.tasks }
-
-	#[inline]
-	pub fn source(&self) -> Source {
-		use Source::*;
-		match self.source {
-			Key if self.level != 1 => Ind,
-			Emit if self.level != 1 => EmitInd,
-			Relay if self.level != 1 => RelayInd,
-			s => s,
-		}
-	}
+	pub(crate) fn source(&self) -> Source { if self.level != 1 { Source::Ind } else { self.source } }
 }

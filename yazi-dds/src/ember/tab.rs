@@ -1,18 +1,18 @@
 use mlua::{IntoLua, Lua, Value};
 use serde::{Deserialize, Serialize};
-use yazi_shared::Id;
+use yazi_shared::id::Id;
 
 use super::Ember;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmberTab {
-	pub id: Id,
+	id: Id,
 }
 
 impl EmberTab {
-	pub fn owned(id: Id) -> Ember<'static> { Self { id }.into() }
+	pub(crate) fn borrowed(id: Id) -> Ember<'static> { Self { id }.into() }
 
-	pub fn borrowed(id: Id) -> Ember<'static> { Self::owned(id) }
+	pub(crate) fn owned(id: Id) -> Ember<'static> { Self::borrowed(id) }
 }
 
 impl From<EmberTab> for Ember<'_> {

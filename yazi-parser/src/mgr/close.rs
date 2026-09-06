@@ -1,19 +1,27 @@
-use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::event::CmdCow;
+use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Value};
+use serde::{Deserialize, Serialize};
+use yazi_core::app::QuitOpt;
+use yazi_shared::event::ActionCow;
+use yazi_shim::mlua::SER_OPT;
 
-use crate::mgr::QuitOpt;
-
-#[derive(Debug, Default)]
-pub struct CloseOpt(pub QuitOpt);
-
-impl From<CmdCow> for CloseOpt {
-	fn from(c: CmdCow) -> Self { Self(c.into()) }
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CloseForm {
+	#[serde(flatten)]
+	pub opt: QuitOpt,
 }
 
-impl FromLua for CloseOpt {
-	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+impl TryFrom<ActionCow> for CloseForm {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		Ok(Self { opt: if let Some(opt) = a.take_any("opt") { opt } else { a.try_into()? } })
+	}
 }
 
-impl IntoLua for CloseOpt {
-	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+impl FromLua for CloseForm {
+	fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> { lua.from_value(value) }
+}
+
+impl IntoLua for CloseForm {
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> { lua.to_value_with(&self, SER_OPT) }
 }

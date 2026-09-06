@@ -1,33 +1,33 @@
 use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
-use yazi_shared::{event::{CmdCow, Data}, url::UrlCow};
+use yazi_shared::{event::ActionCow, url::UrlBuf};
 
 #[derive(Debug, Default)]
-pub struct PeekOpt {
+pub struct PeekForm {
 	pub skip:        Option<usize>,
 	pub force:       bool,
-	pub only_if:     Option<UrlCow<'static>>,
+	pub only_if:     Option<UrlBuf>,
 	pub upper_bound: bool,
 }
 
-impl From<CmdCow> for PeekOpt {
-	fn from(mut c: CmdCow) -> Self {
+impl From<ActionCow> for PeekForm {
+	fn from(mut a: ActionCow) -> Self {
 		Self {
-			skip:        c.first().and_then(Data::as_usize),
-			force:       c.bool("force"),
-			only_if:     c.take_url("only-if"),
-			upper_bound: c.bool("upper-bound"),
+			skip:        a.first().ok(),
+			force:       a.bool("force"),
+			only_if:     a.take("only-if").ok(),
+			upper_bound: a.bool("upper-bound"),
 		}
 	}
 }
 
-impl From<bool> for PeekOpt {
+impl From<bool> for PeekForm {
 	fn from(force: bool) -> Self { Self { force, ..Default::default() } }
 }
 
-impl FromLua for PeekOpt {
+impl FromLua for PeekForm {
 	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
 }
 
-impl IntoLua for PeekOpt {
+impl IntoLua for PeekForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

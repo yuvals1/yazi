@@ -1,11 +1,13 @@
-use std::fs::File;
+use std::{fs::File, io};
 
 use anyhow::Context;
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use ratatui_core::style::Color;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use yazi_fs::Xdg;
-use yazi_shared::{LOG_LEVEL, RoCell};
+use yazi_macro::writef;
+use yazi_shim::{cell::RoCell, log::LOG_LEVEL};
+use yazi_tty::sequence::{SetFg, SetSgr};
 
 static _GUARD: RoCell<WorkerGuard> = RoCell::new();
 
@@ -19,7 +21,7 @@ impl Logs {
 		}
 
 		let state_dir = Xdg::state_dir();
-		std::fs::create_dir_all(&state_dir)
+		std::fs::create_dir_all(state_dir)
 			.with_context(|| format!("failed to create state directory: {state_dir:?}"))?;
 
 		let log_path = state_dir.join("yazi.log");
@@ -29,17 +31,17 @@ impl Logs {
 		let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
 		tracing_subscriber::fmt()
 			.pretty()
-			.with_env_filter(EnvFilter::new(level))
+			.with_env_filter(EnvFilter::default().add_directive(level.as_ref().parse()?))
 			.with_writer(non_blocking)
 			.with_ansi(cfg!(debug_assertions))
 			.init();
 
 		_GUARD.init(guard);
-		Ok(crossterm::execute!(
-			std::io::stderr(),
-			SetForegroundColor(Color::Yellow),
-			Print(format!("Running with log level `{level}`, logs are written to {log_path:?}\n")),
-			ResetColor
+		Ok(writef!(
+			io::stderr(),
+			"{}Running with log level `{level}`, logs are written to {log_path:?}\n{}",
+			SetFg(Color::Yellow),
+			SetSgr::Reset,
 		)?)
 	}
 }

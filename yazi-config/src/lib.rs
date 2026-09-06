@@ -1,82 +1,108 @@
-#![allow(clippy::module_inception)]
+yazi_macro::mod_pub!(keymap mgr open opener plugin popup preview tasks theme vfs which);
 
-yazi_macro::mod_pub!(keymap mgr open opener plugin popup preview scheme tasks theme which);
+yazi_macro::mod_flat!(icon inject layout mixing pattern platform preset priority selectable selector tests yazi);
 
-yazi_macro::mod_flat!(color icon layout pattern platform preset priority style yazi);
+use std::io::Write;
 
-use std::io::{Read, Write};
+use anyhow::Context;
+use yazi_fs::Xdg;
+use yazi_macro::writef;
+use yazi_shim::{cell::{RoCell, SyncCell}, toml::{DeserializeOver, DeserializeOverWith}};
+use yazi_term::TERM;
+use yazi_tty::{TTY, sequence::SetSgr};
 
-use yazi_shared::{RoCell, SyncCell};
-use yazi_term::tty::TTY;
+use crate::theme::{Flavor, Theme};
 
 pub static YAZI: RoCell<yazi::Yazi> = RoCell::new();
 pub static KEYMAP: RoCell<keymap::Keymap> = RoCell::new();
-pub static THEME: RoCell<theme::Theme> = RoCell::new();
+pub static THEME: RoCell<Theme> = RoCell::new();
+pub(crate) static VFS: RoCell<vfs::Vfs> = RoCell::new();
 pub static LAYOUT: SyncCell<Layout> = SyncCell::new(Layout::default());
 
-pub fn init() -> anyhow::Result<()> {
+pub fn setup() -> anyhow::Result<()> {
 	if let Err(e) = try_init(true) {
 		wait_for_key(e)?;
 		try_init(false)?;
 	}
+
 	Ok(())
 }
 
 fn try_init(merge: bool) -> anyhow::Result<()> {
 	let mut yazi = Preset::yazi()?;
 	let mut keymap = Preset::keymap()?;
+	let mut vfs = Preset::vfs()?;
+	let mut theme = Preset::theme(false)?;
 
 	if merge {
-		yazi = yazi.deserialize_over(toml::Deserializer::parse(&yazi::Yazi::read()?)?)?;
-		keymap = keymap.deserialize_over(toml::Deserializer::parse(&keymap::Keymap::read()?)?)?;
+		yazi = parse("yazi.toml", yazi.deserialize_over(&yazi::Yazi::read()?))?;
+		keymap = parse("keymap.toml", keymap.deserialize_over(&keymap::Keymap::read()?))?;
+		vfs = parse("vfs.toml", vfs.deserialize_over(&vfs::Vfs::read()?))?;
+		theme = parse("theme.toml", theme.deserialize_over(&Theme::read()?))?;
+	} else {
+		yazi = yazi.deserialize_over("")?;
+		keymap = keymap.deserialize_over("")?;
+		vfs = vfs.deserialize_over("")?;
+		theme = theme.deserialize_over("")?;
 	}
 
-	YAZI.init(yazi.reshape()?);
-	KEYMAP.init(keymap.reshape()?);
+	YAZI.init(yazi);
+	KEYMAP.init(keymap);
+	VFS.init(vfs);
+	THEME.init(theme.reshape(false)?);
 	Ok(())
 }
 
-pub fn init_flavor(light: bool) -> anyhow::Result<()> {
-	if let Err(e) = try_init_flavor(light, true) {
-		wait_for_key(e)?;
-		try_init_flavor(light, false)?;
-	}
-	Ok(())
+pub fn build_flavor(light: bool) -> anyhow::Result<Theme> {
+	let mut preset = Preset::theme(light)?;
+	let theme_str = Theme::read()?;
+	let theme = parse("theme.toml", toml::de::DeTable::parse(&theme_str))?;
+
+	let flavor_str = parse("theme.toml", Flavor::from_theme(&theme, &theme_str))?.read(light)?;
+
+	preset = preset.deserialize_over(&flavor_str)?;
+	preset = parse(
+		"theme.toml",
+		error_with_input(preset.deserialize_over_with(toml::de::Deserializer::from(theme)), &theme_str),
+	)?;
+
+	preset.reshape(light)
 }
 
-fn try_init_flavor(light: bool, merge: bool) -> anyhow::Result<()> {
-	let mut theme = Preset::theme(light)?;
-
-	if merge {
-		let shadow =
-			theme::Theme::deserialize_shadow(toml::Deserializer::parse(&theme::Theme::read()?)?)?;
-		let flavor = shadow.flavor.as_ref().map(theme::Flavor::from).unwrap_or_default().read(light)?;
-		theme = theme.deserialize_over(toml::Deserializer::parse(&flavor)?)?;
-		theme = theme.deserialize_over_with::<toml::Value>(shadow)?;
-	}
-
-	THEME.init(theme.reshape(light)?);
-	Ok(())
+fn parse<T, E>(name: &str, result: Result<T, E>) -> anyhow::Result<T>
+where
+	E: std::error::Error + Send + Sync + 'static,
+{
+	result.with_context(|| format!("Failed to parse config {:?}", Xdg::config_dir().join(name)))
 }
 
 fn wait_for_key(e: anyhow::Error) -> anyhow::Result<()> {
-	let stdout = &mut *TTY.lockout();
+	let mut stdout = TTY.lockout();
 
-	writeln!(stdout, "{e}")?;
+	write!(stdout, "{}\r\n", e.to_string().replace('\n', "\r\n"))?;
 	if let Some(src) = e.source() {
-		writeln!(stdout, "\nCaused by:\n{src}")?;
+		write!(stdout, "\r\nCaused by:\r\n{}\r\n", src.to_string().replace('\n', "\r\n"))?;
 	}
 
-	use crossterm::style::{Attribute, Print, SetAttributes};
-	crossterm::execute!(
+	writef!(
 		stdout,
-		SetAttributes(Attribute::Reverse.into()),
-		SetAttributes(Attribute::Bold.into()),
-		Print("Press <Enter> to continue with preset settings..."),
-		SetAttributes(Attribute::Reset.into()),
-		Print("\n"),
+		"{}{}Press any key to continue with preset settings...{}",
+		SetSgr::Reverse,
+		SetSgr::Bold,
+		SetSgr::Reset
 	)?;
 
-	TTY.reader().read_exact(&mut [0])?;
+	drop(stdout);
+	TERM.source.try_poll(None, |event| event.is_key())?;
 	Ok(())
+}
+
+pub(crate) fn error_with_input<T>(
+	result: Result<T, toml::de::Error>,
+	input: &str,
+) -> Result<T, toml::de::Error> {
+	result.map_err(|mut err| {
+		err.set_input(Some(input));
+		err
+	})
 }

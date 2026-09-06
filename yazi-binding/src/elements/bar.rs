@@ -1,15 +1,17 @@
-use mlua::{AnyUserData, IntoLua, Lua, MetaMethod, Table, UserData, Value};
-use ratatui::widgets::Borders;
+use mlua::{AnyUserData, IntoLua, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::borders::Borders;
 
 use super::{Area, Edge};
+use crate::elements::Spatial;
 
 #[derive(Clone, Debug, Default)]
 pub struct Bar {
-	pub(super) area: Area,
+	area: Area,
 
 	edge:   Edge,
 	symbol: String,
-	style:  ratatui::style::Style,
+	style:  ratatui_core::style::Style,
 }
 
 impl Bar {
@@ -21,8 +23,25 @@ impl Bar {
 		bar.set_metatable(Some(lua.create_table_from([(MetaMethod::Call.name(), new)])?))?;
 		bar.into_lua(lua)
 	}
+}
 
-	pub(super) fn render(self, rect: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+impl TryFrom<&AnyUserData> for Bar {
+	type Error = mlua::Error;
+
+	fn try_from(value: &AnyUserData) -> Result<Self, Self::Error> { value.take() }
+}
+
+impl Spatial for Bar {
+	fn area(&self) -> Area { self.area }
+
+	fn set_area(&mut self, area: Area) { self.area = area; }
+}
+
+impl Widget for &Bar {
+	fn render(self, rect: ratatui_core::layout::Rect, buf: &mut ratatui_core::buffer::Buffer)
+	where
+		Self: Sized,
+	{
 		if rect.area() == 0 {
 			return;
 		}
@@ -63,15 +82,15 @@ impl Bar {
 }
 
 impl UserData for Bar {
-	fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+	fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
 		crate::impl_area_method!(methods);
 		crate::impl_style_method!(methods, style);
 
-		methods.add_function_mut("edge", |_, (ud, edge): (AnyUserData, Edge)| {
+		methods.add_function("edge", |_, (ud, edge): (AnyUserData, Edge)| {
 			ud.borrow_mut::<Self>()?.edge = edge;
 			Ok(ud)
 		});
-		methods.add_function_mut("symbol", |_, (ud, symbol): (AnyUserData, String)| {
+		methods.add_function("symbol", |_, (ud, symbol): (AnyUserData, String)| {
 			ud.borrow_mut::<Self>()?.symbol = symbol;
 			Ok(ud)
 		});

@@ -1,87 +1,77 @@
-use std::{ffi::OsString, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::{select, time};
-use yazi_boot::ARGS;
 use yazi_config::popup::ConfirmCfg;
-use yazi_dds::spark::SparkKind;
-use yazi_macro::{emit, succ};
-use yazi_parser::mgr::{OpenOpt, QuitOpt};
-use yazi_proxy::ConfirmProxy;
-use yazi_shared::{event::{Data, EventQuit}, url::UrlBuf};
+use yazi_core::app::QuitOpt;
+use yazi_macro::{act, succ};
+use yazi_parser::{app::QuitForm, spark::SparkKind};
+use yazi_proxy::{AppProxy, ConfirmProxy};
+use yazi_shared::{data::Data, strand::{Strand, StrandLike, ToStrandJoin}, url::AsUrl};
 
 use crate::{Actor, Ctx};
 
 pub struct Quit;
 
 impl Actor for Quit {
-	type Options = QuitOpt;
+	type Form = QuitForm;
 
 	const NAME: &str = "quit";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		let event = opt.into();
-
-		let ongoing = cx.tasks().ongoing().clone();
-		let (left, left_names) = {
+	fn act(cx: &mut Ctx, Self::Form { opt, .. }: Self::Form) -> Result<Data> {
+		let ongoing = cx.tasks.scheduler.ongoing.clone();
+		let (left, left_titles) = {
 			let ongoing = ongoing.lock();
-			(ongoing.len(), ongoing.values().take(11).map(|t| t.name.clone()).collect())
+			(ongoing.len(), ongoing.values().take(11).map(|t| t.title.clone()).collect())
 		};
 
 		if left == 0 {
-			succ!(emit!(Quit(event)));
+			return act!(app:quit, cx, opt);
 		}
 
 		tokio::spawn(async move {
 			let mut i = 0;
-			let mut rx = ConfirmProxy::show_rx(ConfirmCfg::quit(left, left_names));
+			let token = ConfirmProxy::show_sync(ConfirmCfg::quit(left, left_titles));
 			loop {
 				select! {
 					_ = time::sleep(Duration::from_millis(50)) => {
 						i += 1;
 						if i > 40 { break }
 						else if ongoing.lock().is_empty() {
-							emit!(Quit(event));
+							AppProxy::quit(opt);
 							return;
 						}
 					}
-					b = &mut rx => {
-						if b.unwrap_or(false) {
-							emit!(Quit(event));
+					b = token.future() => {
+						if b {
+							AppProxy::quit(opt);
 						}
 						return;
 					}
 				}
 			}
 
-			if rx.await.unwrap_or(false) {
-				emit!(Quit(event));
+			if token.future().await {
+				AppProxy::quit(opt);
 			}
 		});
 		succ!();
 	}
 
-	fn hook(cx: &Ctx, _opt: &Self::Options) -> Option<SparkKind> {
-		Some(SparkKind::KeyQuit).filter(|_| cx.source().is_key())
+	fn hook(cx: &Ctx, _form: &Self::Form) -> Option<SparkKind> {
+		cx.source().is_key().then_some(SparkKind::KeyQuit)
 	}
 }
 
 impl Quit {
-	pub(super) fn quit_with_selected<'a, I>(opt: OpenOpt, selected: I) -> bool
+	pub(super) fn with_selected<I>(selected: I)
 	where
-		I: Iterator<Item = &'a UrlBuf>,
+		I: IntoIterator,
+		I::Item: AsUrl,
 	{
-		if opt.interactive || ARGS.chooser_file.is_none() {
-			return false;
+		let paths = selected.into_iter().join(Strand::Utf8("\n"));
+		if !paths.is_empty() {
+			AppProxy::quit(QuitOpt { selected: Some(paths), ..Default::default() });
 		}
-
-		let paths = selected.fold(OsString::new(), |mut s, u| {
-			s.push(u.os_str());
-			s.push("\n");
-			s
-		});
-
-		emit!(Quit(EventQuit { selected: Some(paths), ..Default::default() }));
-		true
 	}
 }

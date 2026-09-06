@@ -1,22 +1,26 @@
 use anyhow::Result;
 use yazi_macro::act;
-use yazi_parser::mgr::CloseOpt;
-use yazi_shared::event::Data;
+use yazi_parser::{mgr::CloseForm, spark::SparkKind};
+use yazi_shared::data::Data;
 
 use crate::{Actor, Ctx};
 
 pub struct Close;
 
 impl Actor for Close {
-	type Options = CloseOpt;
+	type Form = CloseForm;
 
 	const NAME: &str = "close";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, Self::Form { opt }: Self::Form) -> Result<Data> {
 		if cx.tabs().len() > 1 {
 			act!(mgr:tab_close, cx, cx.tabs().cursor)
 		} else {
-			act!(mgr:quit, cx, opt.0)
+			act!(mgr:quit, cx, opt)
 		}
+	}
+
+	fn hook(cx: &Ctx, _form: &Self::Form) -> Option<SparkKind> {
+		cx.source().is_key().then_some(SparkKind::KeyClose)
 	}
 }

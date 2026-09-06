@@ -1,30 +1,24 @@
-use anyhow::bail;
 use mlua::{ExternalError, IntoLua, Lua, Value};
-use yazi_shared::event::CmdCow;
+use serde::Deserialize;
+use yazi_shared::event::ActionCow;
+use yazi_widgets::Step;
 
-use crate::Step;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ArrowOpt {
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct ArrowForm {
+	#[serde(alias = "0")]
 	pub step: Step,
 }
 
-impl TryFrom<CmdCow> for ArrowOpt {
+impl TryFrom<ActionCow> for ArrowForm {
 	type Error = anyhow::Error;
 
-	fn try_from(c: CmdCow) -> Result<Self, Self::Error> {
-		let Some(step) = c.first() else {
-			bail!("'step' is required for ArrowOpt");
-		};
-
-		Ok(Self { step: step.try_into()? })
-	}
+	fn try_from(a: ActionCow) -> Result<Self, Self::Error> { Ok(a.deserialize()?) }
 }
 
-impl From<isize> for ArrowOpt {
+impl From<isize> for ArrowForm {
 	fn from(n: isize) -> Self { Self { step: n.into() } }
 }
 
-impl IntoLua for ArrowOpt {
+impl IntoLua for ArrowForm {
 	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
 }

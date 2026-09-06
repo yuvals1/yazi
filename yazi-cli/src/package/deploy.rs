@@ -1,50 +1,55 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use yazi_fs::{provider::local::Local, remove_dir_clean};
+use yazi_fs::engine::{Engine, local::Local};
 use yazi_macro::outln;
 
 use super::Dependency;
 use crate::shared::{copy_and_seal, maybe_exists};
 
 impl Dependency {
-	pub(super) async fn deploy(&mut self) -> Result<()> {
+	pub(super) async fn deploy(&mut self, discard: bool) -> Result<()> {
 		let from = self.local().join(&self.child);
 
 		self.header("Deploying package `{name}`")?;
 		self.is_flavor = maybe_exists(&from.join("flavor.toml")).await;
+		let files =
+			if self.is_flavor { Self::flavor_files() } else { Self::plugin_files(&from).await? };
 
 		let to = self.target();
 		let exists = maybe_exists(&to).await;
-		if exists {
+		if exists && !discard {
 			self.hash_check().await?;
 		}
 
-		Local::create_dir_all(&to).await?;
+		Local::regular(&to).create_dir_all().await?;
 		self.delete_assets().await?;
 
 		let res1 = Self::deploy_assets(from.join("assets"), to.join("assets")).await;
-		let res2 = Self::deploy_sources(&from, &to, self.is_flavor).await;
+		let res2 = Self::deploy_sources(&from, &to, files).await;
 		if !exists && (res2.is_err() || res1.is_err()) {
 			self.delete_assets().await?;
 			self.delete_sources().await?;
+		} else if exists && (res2.is_err() || res1.is_err()) {
+			self.hash = self.hash().await?;
 		}
 
-		remove_dir_clean(&to.into()).await;
-		self.hash = self.hash().await?;
+		Local::regular(&to).remove_dir_clean().await.ok();
 		res2?;
 		res1?;
 
+		self.hash = self.hash().await?;
 		outln!("Done!")?;
+
 		Ok(())
 	}
 
 	async fn deploy_assets(from: PathBuf, to: PathBuf) -> Result<()> {
-		match Local::read_dir(&from).await {
+		match tokio::fs::read_dir(&from).await {
 			Ok(mut it) => {
-				Local::create_dir_all(&to).await?;
-				while let Some(entry) = it.next_entry().await? {
-					let (src, dist) = (entry.path(), to.join(entry.file_name()));
+				Local::regular(&to).create_dir_all().await?;
+				while let Some(dent) = it.next_entry().await? {
+					let (src, dist) = (dent.path(), to.join(dent.file_name()));
 					copy_and_seal(&src, &dist).await.with_context(|| {
 						format!("failed to copy `{}` to `{}`", src.display(), dist.display())
 					})?;
@@ -56,15 +61,9 @@ impl Dependency {
 		Ok(())
 	}
 
-	async fn deploy_sources(from: &Path, to: &Path, is_flavor: bool) -> Result<()> {
-		let files = if is_flavor {
-			&["flavor.toml", "tmtheme.xml", "README.md", "preview.png", "LICENSE", "LICENSE-tmtheme"][..]
-		} else {
-			&["main.lua", "README.md", "LICENSE"][..]
-		};
-
+	async fn deploy_sources(from: &Path, to: &Path, files: Vec<String>) -> Result<()> {
 		for file in files {
-			let (from, to) = (from.join(file), to.join(file));
+			let (from, to) = (from.join(&file), to.join(&file));
 			copy_and_seal(&from, &to)
 				.await
 				.with_context(|| format!("failed to copy `{}` to `{}`", from.display(), to.display()))?;

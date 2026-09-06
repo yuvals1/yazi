@@ -1,12 +1,12 @@
-use std::{ops::Deref, sync::Arc};
+use std::ops::Deref;
 
 use parking_lot::RwLock;
-use yazi_shared::RoCell;
+use yazi_shim::cell::RoCell;
 
 use super::Partition;
 use crate::cha::Cha;
 
-pub(super) type Locked = Arc<RwLock<Partitions>>;
+pub(super) type Locked = RwLock<Partitions>;
 
 pub static PARTITIONS: RoCell<Locked> = RoCell::new();
 
@@ -27,18 +27,31 @@ impl Deref for Partitions {
 
 impl Partitions {
 	#[cfg(unix)]
-	pub fn by_dev(&self, dev: libc::dev_t) -> Option<&Partition> {
+	fn by_dev(&self, dev: u64) -> Option<&Partition> {
 		self.inner.iter().find(|p| p.rdev == Some(dev))
 	}
 
-	pub fn heuristic(&self, _cha: Cha) -> bool {
+	pub fn timeless(&self, _cha: Cha) -> bool {
 		#[cfg(any(target_os = "linux", target_os = "macos"))]
 		{
-			self.by_dev(_cha.dev).is_none_or(|p| p.heuristic())
+			self.by_dev(_cha.dev).is_some_and(|p| p.timeless())
 		}
 		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 		{
-			true
+			// For now, assume other targets update directory mtime correctly
+			false
+		}
+	}
+
+	pub fn soundless(&self, _cha: Cha) -> bool {
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		{
+			self.by_dev(_cha.dev).is_some_and(|p| p.soundless())
+		}
+		#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+		{
+			// For now, assume other targets emit change notifications correctly
+			false
 		}
 	}
 }

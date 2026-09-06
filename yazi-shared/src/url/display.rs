@@ -1,19 +1,12 @@
-use crate::url::{Encode, UrlBuf};
+use crate::{spec::EncodeSpec, url::Url};
 
-pub struct Display<'a> {
-	inner: &'a UrlBuf,
-}
+pub struct Display<'a>(pub(crate) Url<'a>);
 
-impl<'a> Display<'a> {
-	#[inline]
-	pub fn new(inner: &'a UrlBuf) -> Self { Self { inner } }
-}
-
-impl<'a> std::fmt::Display for Display<'a> {
+impl std::fmt::Display for Display<'_> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		let UrlBuf { loc, scheme } = self.inner;
-		if scheme.is_virtual() {
-			Encode::from(self.inner).fmt(f)?;
+		let (kind, loc) = (self.0.kind(), self.0.loc());
+		if kind.is_virtual() {
+			EncodeSpec(self.0).fmt(f)?;
 		}
 		loc.display().fmt(f)
 	}

@@ -1,44 +1,34 @@
-use std::ffi::OsString;
-
-use crossterm::event::{KeyEvent, MouseEvent};
 use tokio::sync::mpsc;
+use yazi_shim::cell::RoCell;
 
-use super::CmdCow;
-use crate::RoCell;
+use super::{ActionCow, EventRx, channel::EventTx};
 
-static TX: RoCell<mpsc::UnboundedSender<Event>> = RoCell::new();
-static RX: RoCell<mpsc::UnboundedReceiver<Event>> = RoCell::new();
+static TX: RoCell<EventTx> = RoCell::new();
+static RX: RoCell<EventRx> = RoCell::new();
 
 #[derive(Debug)]
 pub enum Event {
-	Call(CmdCow),
-	Seq(Vec<CmdCow>),
-	Render,
-	Key(KeyEvent),
-	Mouse(MouseEvent),
-	Resize,
-	Paste(String),
-	Quit(EventQuit),
-}
-
-#[derive(Debug, Default)]
-pub struct EventQuit {
-	pub code:        i32,
-	pub no_cwd_file: bool,
-	pub selected:    Option<OsString>,
+	Call(ActionCow),
+	Seq(Vec<ActionCow>),
+	Term(yazi_term::event::Event),
 }
 
 impl Event {
 	#[inline]
-	pub fn init() {
-		let (tx, rx) = mpsc::unbounded_channel();
-		TX.init(tx);
-		RX.init(rx);
+	pub(crate) fn init() {
+		let (high_tx, high_rx) = mpsc::unbounded_channel();
+		let (normal_tx, normal_rx) = mpsc::unbounded_channel();
+
+		TX.init(EventTx { high: high_tx, normal: normal_tx });
+		RX.init(EventRx { high: high_rx, normal: normal_rx });
 	}
 
 	#[inline]
-	pub fn take() -> mpsc::UnboundedReceiver<Self> { RX.drop() }
+	pub fn take() -> EventRx { RX.drop() }
 
 	#[inline]
-	pub fn emit(self) { TX.send(self).ok(); }
+	pub fn emit(self) { TX.normal.send(self).ok(); }
+
+	#[inline]
+	pub fn preempt(self) { TX.high.send(self).ok(); }
 }

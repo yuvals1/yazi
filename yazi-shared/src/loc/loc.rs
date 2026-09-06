@@ -1,96 +1,212 @@
-use std::{ffi::OsStr, hash::{Hash, Hasher}, ops::Deref, path::Path};
+use std::{hash::{Hash, Hasher}, marker::PhantomData, ops::Deref};
 
 use anyhow::{Result, bail};
 
-use crate::{loc::LocBuf, url::{Uri, Urn}};
+use super::LocAbleImpl;
+use crate::{auth::AuthKind, loc::{LocAble, LocBuf, LocBufAble, StrandAbleImpl}, path::{DynPath, PathDyn, PathView}, strand::AsStrandView};
 
 #[derive(Clone, Copy, Debug)]
-pub struct Loc<'a> {
-	pub(super) inner: &'a Path,
-	pub(super) uri:   usize,
-	pub(super) urn:   usize,
+pub struct Loc<'p, P = &'p std::path::Path> {
+	pub(super) inner:    P,
+	pub(super) uri:      usize,
+	pub(super) urn:      usize,
+	pub(super) _phantom: PhantomData<&'p ()>,
 }
 
-impl Deref for Loc<'_> {
-	type Target = Path;
-
-	fn deref(&self) -> &Self::Target { self.inner }
+impl<'p, P> Default for Loc<'p, P>
+where
+	P: LocAble<'p> + LocAbleImpl<'p>,
+{
+	fn default() -> Self { Self { inner: P::empty(), uri: 0, urn: 0, _phantom: PhantomData } }
 }
 
-impl AsRef<Path> for Loc<'_> {
-	fn as_ref(&self) -> &Path { self.inner }
+impl<'p, P> Deref for Loc<'p, P>
+where
+	P: LocAble<'p>,
+{
+	type Target = P;
+
+	fn deref(&self) -> &Self::Target { &self.inner }
 }
 
-impl<'a> From<&'a LocBuf> for Loc<'a> {
-	fn from(value: &'a LocBuf) -> Self {
-		Self { inner: &value.inner, uri: value.uri, urn: value.urn }
-	}
+impl<'p, P> DynPath for Loc<'p, P>
+where
+	P: LocAble<'p> + DynPath,
+{
+	fn dyn_path(&self) -> PathDyn<'_> { self.inner.dyn_path() }
+}
+
+// FIXME: remove
+impl AsRef<std::path::Path> for Loc<'_, &std::path::Path> {
+	fn as_ref(&self) -> &std::path::Path { self.inner }
 }
 
 // --- Hash
-impl Hash for Loc<'_> {
+impl<'p, P> Hash for Loc<'p, P>
+where
+	P: LocAble<'p> + Hash,
+{
 	fn hash<H: Hasher>(&self, state: &mut H) { self.inner.hash(state) }
 }
 
-impl<'a, T: ?Sized + AsRef<OsStr>> From<&'a T> for Loc<'a> {
-	fn from(value: &'a T) -> Self {
-		let path = Path::new(value.as_ref());
-		let Some(name) = path.file_name() else {
-			let uri = path.as_os_str().len();
-			return Self { inner: path, uri, urn: 0 };
-		};
-
-		let name_len = name.len();
-		let prefix_len = unsafe {
-			name
-				.as_encoded_bytes()
-				.as_ptr()
-				.offset_from_unsigned(path.as_os_str().as_encoded_bytes().as_ptr())
-		};
-
-		let bytes = path.as_os_str().as_encoded_bytes();
-		Self {
-			inner: Path::new(unsafe {
-				OsStr::from_encoded_bytes_unchecked(&bytes[..prefix_len + name_len])
-			}),
-			uri:   name_len,
-			urn:   name_len,
-		}
-	}
-}
-
-impl From<Loc<'_>> for LocBuf {
-	fn from(value: Loc<'_>) -> Self {
-		Self { inner: value.inner.to_owned(), uri: value.uri, urn: value.urn }
+impl<'p, P> From<Loc<'p, P>> for LocBuf<<P as LocAble<'p>>::Owned>
+where
+	P: LocAble<'p> + LocAbleImpl<'p>,
+	<P as LocAble<'p>>::Owned: LocBufAble,
+{
+	fn from(value: Loc<'p, P>) -> Self {
+		Self { inner: value.inner.to_path_buf(), uri: value.uri, urn: value.urn }
 	}
 }
 
 // --- Eq
-impl PartialEq for Loc<'_> {
+impl<'p, P> PartialEq for Loc<'p, P>
+where
+	P: LocAble<'p> + PartialEq,
+{
 	fn eq(&self, other: &Self) -> bool { self.inner == other.inner }
 }
 
-impl Eq for Loc<'_> {}
+impl<'p, P> Eq for Loc<'p, P> where P: LocAble<'p> + Eq {}
 
-impl<'a> Loc<'a> {
-	pub fn new<T>(path: &'a T, base: &Path, trail: &Path) -> Self
+impl<'p, P> Loc<'p, P>
+where
+	P: LocAble<'p> + LocAbleImpl<'p>,
+{
+	#[inline]
+	pub fn as_inner(self) -> P { self.inner }
+
+	pub(crate) fn bare<T>(path: T) -> Self
 	where
-		T: AsRef<Path> + ?Sized,
+		T: PathView<'p, P>,
 	{
-		let mut loc = Self::from(path.as_ref());
-		loc.uri =
-			loc.inner.strip_prefix(base).expect("Loc must start with the given base").as_os_str().len();
-		loc.urn =
-			loc.inner.strip_prefix(trail).expect("Loc must start with the given trail").as_os_str().len();
+		let path = path.path_view();
+		let Some(name) = path.file_name() else {
+			let p = path.strip_prefix(P::empty()).unwrap();
+			return Self { inner: p, uri: 0, urn: 0, _phantom: PhantomData };
+		};
+
+		let name_len = name.len();
+		let prefix_len = unsafe {
+			name.as_encoded_bytes().as_ptr().offset_from_unsigned(path.as_encoded_bytes().as_ptr())
+		};
+
+		let bytes = &path.as_encoded_bytes()[..prefix_len + name_len];
+		Self {
+			inner:    unsafe { P::from_encoded_bytes_unchecked(bytes) },
+			uri:      name_len,
+			urn:      name_len,
+			_phantom: PhantomData,
+		}
+	}
+
+	#[inline]
+	pub(crate) fn base(self) -> P {
+		unsafe {
+			P::from_encoded_bytes_unchecked(
+				self.inner.as_encoded_bytes().get_unchecked(..self.inner.len() - self.uri),
+			)
+		}
+	}
+
+	pub(crate) fn floated<'a, T, S>(path: T, base: S) -> Self
+	where
+		T: PathView<'p, P>,
+		S: AsStrandView<'a, P::Strand<'a>>,
+	{
+		let mut loc = Self::bare(path);
+		loc.uri = loc.inner.strip_prefix(base).expect("Loc must start with the given base").len();
 		loc
 	}
 
-	pub fn with(path: &'a Path, uri: usize, urn: usize) -> Result<Self> {
+	#[inline]
+	pub(crate) fn has_base(self) -> bool { self.inner.len() != self.uri }
+
+	#[inline]
+	pub(crate) fn has_trail(self) -> bool { self.inner.len() != self.urn }
+
+	pub(crate) fn new<'a, T, S>(path: T, base: S, trail: S) -> Self
+	where
+		T: PathView<'p, P>,
+		S: AsStrandView<'a, P::Strand<'a>>,
+	{
+		let mut loc = Self::bare(path);
+		loc.uri = loc.inner.strip_prefix(base).expect("Loc must start with the given base").len();
+		loc.urn = loc.inner.strip_prefix(trail).expect("Loc must start with the given trail").len();
+		debug_assert!(!loc.urn().has_root(), "Loc URN cannot include a root directory");
+		loc
+	}
+
+	#[inline]
+	pub(crate) fn parent(self) -> Option<P> { self.inner.parent() }
+
+	pub(crate) fn saturated<'a, T>(path: T, kind: AuthKind) -> Self
+	where
+		T: PathView<'p, P>,
+	{
+		match kind {
+			AuthKind::Regular => Self::bare(path),
+			AuthKind::Search => Self::zeroed(path),
+			AuthKind::Mount => Self::zeroed(path),
+			AuthKind::Hub => Self::bare(path),
+			AuthKind::Scope => Self::bare(path),
+			AuthKind::Sftp => Self::bare(path),
+		}
+	}
+
+	#[inline]
+	pub(crate) fn trail(self) -> P {
+		unsafe {
+			P::from_encoded_bytes_unchecked(
+				self.inner.as_encoded_bytes().get_unchecked(..self.inner.len() - self.urn),
+			)
+		}
+	}
+
+	#[inline]
+	pub(crate) fn triple(self) -> (P, P, P) {
+		let len = self.inner.len();
+
+		let base = ..len - self.uri;
+		let rest = len - self.uri..len - self.urn;
+		let urn = len - self.urn..;
+
+		unsafe {
+			(
+				P::from_encoded_bytes_unchecked(self.inner.as_encoded_bytes().get_unchecked(base)),
+				P::from_encoded_bytes_unchecked(self.inner.as_encoded_bytes().get_unchecked(rest)),
+				P::from_encoded_bytes_unchecked(self.inner.as_encoded_bytes().get_unchecked(urn)),
+			)
+		}
+	}
+
+	#[inline]
+	pub(crate) fn uri(self) -> P {
+		unsafe {
+			P::from_encoded_bytes_unchecked(
+				self.inner.as_encoded_bytes().get_unchecked(self.inner.len() - self.uri..),
+			)
+		}
+	}
+
+	#[inline]
+	pub(crate) fn urn(self) -> P {
+		unsafe {
+			P::from_encoded_bytes_unchecked(
+				self.inner.as_encoded_bytes().get_unchecked(self.inner.len() - self.urn..),
+			)
+		}
+	}
+
+	pub(crate) fn with<T>(path: T, uri: usize, urn: usize) -> Result<Self>
+	where
+		T: PathView<'p, P>,
+	{
 		if urn > uri {
 			bail!("URN cannot be longer than URI");
 		}
 
-		let mut loc = Self::from(path);
+		let mut loc = Self::bare(path);
 		if uri == 0 {
 			(loc.uri, loc.urn) = (0, 0);
 			return Ok(loc);
@@ -104,106 +220,74 @@ impl<'a> Loc<'a> {
 				bail!("URI exceeds the entire URL");
 			}
 			if i == urn {
-				loc.urn = loc.strip_prefix(it.clone()).unwrap().as_os_str().len();
+				loc.urn = loc.strip_prefix(it.clone()).unwrap().len();
 			}
 			if i == uri {
-				loc.uri = loc.strip_prefix(it).unwrap().as_os_str().len();
+				loc.uri = loc.strip_prefix(it).unwrap().len();
 				break;
 			}
+		}
+
+		if loc.urn().has_root() {
+			bail!("URN cannot include a root directory");
 		}
 		Ok(loc)
 	}
 
-	pub fn zeroed<T: AsRef<Path> + ?Sized>(path: &'a T) -> Self {
-		let mut loc = Self::from(path.as_ref());
+	pub(crate) fn zeroed<T>(path: T) -> Self
+	where
+		T: PathView<'p, P>,
+	{
+		let mut loc = Self::bare(path);
 		(loc.uri, loc.urn) = (0, 0);
 		loc
 	}
+}
 
-	pub fn floated<T: AsRef<Path> + ?Sized>(path: &'a T, base: &Path) -> Self {
-		let mut loc = Self::from(path.as_ref());
-		loc.uri =
-			loc.inner.strip_prefix(base).expect("Loc must start with the given base").as_os_str().len();
-		loc
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use typed_path::UnixPath;
+
+	use super::*;
+
+	#[test]
+	fn test_parent() {
+		assert_eq!(Loc::bare(Path::new("foo")).parent(), Some(Path::new("")));
+		assert_eq!(Loc::bare(Path::new("")).parent(), None);
+
+		assert_eq!(Loc::bare(UnixPath::new("foo")).parent(), Some(UnixPath::new("")));
+		assert_eq!(Loc::bare(UnixPath::new("")).parent(), None);
 	}
 
-	#[inline]
-	pub fn as_loc(self) -> Self { self }
+	#[test]
+	fn test_with() -> Result<()> {
+		let cases = [
+			// Relative paths
+			("tmp/test.zip/foo/bar", 3, 2, "test.zip/foo/bar", "foo/bar"),
+			("tmp/test.zip/foo/bar/", 3, 2, "test.zip/foo/bar", "foo/bar"),
+			// Absolute paths
+			("/tmp/test.zip/foo/bar", 3, 2, "test.zip/foo/bar", "foo/bar"),
+			("/tmp/test.zip/foo/bar/", 3, 2, "test.zip/foo/bar", "foo/bar"),
+			// Relative path with parent components
+			("tmp/test.zip/foo/bar/../..", 5, 4, "test.zip/foo/bar/../..", "foo/bar/../.."),
+			("tmp/test.zip/foo/bar/../../", 5, 4, "test.zip/foo/bar/../..", "foo/bar/../.."),
+			// Absolute path with parent components
+			("/tmp/test.zip/foo/bar/../..", 5, 4, "test.zip/foo/bar/../..", "foo/bar/../.."),
+			("/tmp/test.zip/foo/bar/../../", 5, 4, "test.zip/foo/bar/../..", "foo/bar/../.."),
+		];
 
-	#[inline]
-	pub fn as_path(self) -> &'a Path { self.inner }
+		for (path, uri, urn, expect_uri, expect_urn) in cases {
+			let loc = Loc::with(Path::new(path), uri, urn)?;
+			assert_eq!(loc.uri().to_str().unwrap(), expect_uri);
+			assert_eq!(loc.urn().to_str().unwrap(), expect_urn);
 
-	#[inline]
-	pub fn uri(self) -> &'a Uri {
-		Uri::new(unsafe {
-			OsStr::from_encoded_bytes_unchecked(
-				self.bytes().get_unchecked(self.bytes().len() - self.uri..),
-			)
-		})
-	}
-
-	#[inline]
-	pub fn urn(self) -> &'a Urn {
-		Urn::new(unsafe {
-			OsStr::from_encoded_bytes_unchecked(
-				self.bytes().get_unchecked(self.bytes().len() - self.urn..),
-			)
-		})
-	}
-
-	#[inline]
-	pub fn base(self) -> &'a Urn {
-		Urn::new(unsafe {
-			OsStr::from_encoded_bytes_unchecked(
-				self.bytes().get_unchecked(..self.bytes().len() - self.uri),
-			)
-		})
-	}
-
-	#[inline]
-	pub fn has_base(self) -> bool { self.bytes().len() != self.uri }
-
-	#[inline]
-	pub fn trail(self) -> &'a Urn {
-		Urn::new(unsafe {
-			OsStr::from_encoded_bytes_unchecked(
-				self.bytes().get_unchecked(..self.bytes().len() - self.urn),
-			)
-		})
-	}
-
-	#[inline]
-	pub fn has_trail(self) -> bool { self.bytes().len() != self.urn }
-
-	#[inline]
-	pub fn name(self) -> Option<&'a OsStr> { self.inner.file_name() }
-
-	#[inline]
-	pub fn stem(self) -> Option<&'a OsStr> { self.inner.file_stem() }
-
-	#[inline]
-	pub fn ext(self) -> Option<&'a OsStr> { self.inner.extension() }
-
-	#[inline]
-	pub fn parent(self) -> Option<&'a Path> { self.inner.parent() }
-
-	#[inline]
-	pub fn triple(self) -> (&'a Path, &'a Path, &'a Path) {
-		let len = self.bytes().len();
-
-		let base = ..len - self.uri;
-		let rest = len - self.uri..len - self.urn;
-		let urn = len - self.urn..;
-
-		unsafe {
-			(
-				Path::new(OsStr::from_encoded_bytes_unchecked(self.bytes().get_unchecked(base))),
-				Path::new(OsStr::from_encoded_bytes_unchecked(self.bytes().get_unchecked(rest))),
-				Path::new(OsStr::from_encoded_bytes_unchecked(self.bytes().get_unchecked(urn))),
-			)
+			let loc = Loc::with(UnixPath::new(path), uri, urn)?;
+			assert_eq!(loc.uri().to_str().unwrap(), expect_uri);
+			assert_eq!(loc.urn().to_str().unwrap(), expect_urn);
 		}
-	}
 
-	#[inline]
-	fn bytes(self) -> &'a [u8] { self.inner.as_os_str().as_encoded_bytes() }
+		Ok(())
+	}
 }

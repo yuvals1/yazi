@@ -1,18 +1,19 @@
 use std::ops::Range;
 
-use ratatui::{layout::Rect, text::Line, widgets::Widget};
-use yazi_config::THEME;
+use ratatui_core::{buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
 use super::Input;
 
 impl Widget for &Input {
-	fn render(self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer)
+	fn render(self, area: Rect, buf: &mut Buffer)
 	where
 		Self: Sized,
 	{
-		yazi_binding::elements::Clear::default().render(area, buf);
+		let normal = self.styles.normal.unwrap_or_default();
+		let selected = self.styles.selected.unwrap_or_default();
 
-		Line::styled(self.display(), THEME.input.value).render(area, buf);
+		buf.set_style(area, normal);
+		Line::styled(self.display(), normal).render(area, buf);
 
 		if let Some(Range { start, end }) = self.selected() {
 			let s = start.min(area.width);
@@ -23,7 +24,7 @@ impl Widget for &Input {
 					width:  (end - start).min(area.width - s),
 					height: area.height.min(1),
 				},
-				THEME.input.selected,
+				selected,
 			);
 		}
 	}

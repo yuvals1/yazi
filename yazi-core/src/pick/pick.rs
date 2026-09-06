@@ -1,6 +1,5 @@
-use anyhow::Result;
-use tokio::sync::oneshot::Sender;
-use yazi_config::{YAZI, popup::Position};
+use tokio::sync::mpsc::UnboundedSender;
+use yazi_binding::position::Position;
 use yazi_widgets::Scrollable;
 
 #[derive(Default)]
@@ -11,7 +10,7 @@ pub struct Pick {
 
 	pub offset:   usize,
 	pub cursor:   usize,
-	pub callback: Option<Sender<Result<usize>>>,
+	pub callback: Option<UnboundedSender<Option<usize>>>,
 
 	pub visible: bool,
 }
@@ -28,7 +27,7 @@ impl Scrollable for Pick {
 	fn total(&self) -> usize { self.items.len() }
 
 	fn limit(&self) -> usize {
-		self.position.offset.height.saturating_sub(YAZI.pick.border()) as usize
+		self.position.height.saturating_sub(yazi_config::popup::Pick::BORDER) as usize
 	}
 
 	fn cursor_mut(&mut self) -> &mut usize { &mut self.cursor }

@@ -1,60 +1,56 @@
-use std::borrow::Cow;
-
+use yazi_core::{mgr::{CdSource, DisplaceOpt, FilterOpt, FindDoOpt, OpenDoOpt, OpenOpt, SearchOpt}, spot::SpotLock};
 use yazi_macro::{emit, relay};
-use yazi_parser::mgr::{FilterOpt, FindDoOpt, OpenDoOpt, SearchOpt, UpdatePeekedOpt, UpdateSpottedOpt};
-use yazi_shared::{SStr, url::UrlBuf};
+use yazi_shared::{id::Id, url::UrlBuf};
+use yazi_shim::{SStr, strum::IntoStr};
 
 pub struct MgrProxy;
 
 impl MgrProxy {
-	pub fn cd(target: &UrlBuf) {
-		emit!(Call(relay!(mgr:cd, [target]).with("raw", true)));
-	}
-
-	pub fn reveal(target: &UrlBuf) {
-		emit!(Call(relay!(mgr:reveal, [target]).with("raw", true).with("no-dummy", true)));
-	}
-
-	pub fn arrow(step: impl Into<SStr>) {
-		emit!(Call(relay!(mgr:arrow, [step.into()])));
-	}
-
-	pub fn open_do(opt: OpenDoOpt) {
-		emit!(Call(relay!(mgr:open_do).with_any("option", opt)));
-	}
-
-	pub fn remove_do(targets: Vec<UrlBuf>, permanently: bool) {
+	pub fn cd(target: impl Into<UrlBuf>, source: CdSource) {
 		emit!(Call(
-			relay!(mgr:remove_do).with("permanently", permanently).with_any("targets", targets)
+			relay!(mgr:cd, [target.into()]).with("raw", true).with("source", source.into_str())
 		));
 	}
 
-	pub fn find_do(opt: FindDoOpt) {
-		emit!(Call(relay!(mgr:find_do).with_any("opt", opt)));
+	pub fn displace_do(tab: Id, opt: DisplaceOpt) {
+		emit!(Call(relay!(mgr:displace_do).with("tab", tab).with_any("opt", opt)));
 	}
 
 	pub fn filter_do(opt: FilterOpt) {
 		emit!(Call(relay!(mgr:filter_do).with_any("opt", opt)));
 	}
 
-	pub fn search_do(opt: SearchOpt) {
+	pub fn find_do(opt: FindDoOpt) {
+		emit!(Call(relay!(mgr:find_do).with_any("opt", opt)));
+	}
+
+	pub fn open(opt: OpenOpt) {
+		emit!(Call(relay!(mgr:open).with_any("opt", opt)));
+	}
+
+	pub fn open_do(opt: OpenDoOpt) {
+		emit!(Call(relay!(mgr:open_do).with_any("opt", opt)));
+	}
+
+	pub fn remove_do(permanently: bool, targets: impl Into<Vec<UrlBuf>>) {
 		emit!(Call(
-			// TODO: use second positional argument instead of `args` parameter
-			relay!(mgr:search_do, [opt.subject])
-				.with("via", Cow::Borrowed(opt.via.into_str()))
-				.with("args", opt.args_raw.into_owned())
+			relay!(mgr:remove_do).with("permanently", permanently).with_any("targets", targets.into())
 		));
 	}
 
-	pub fn update_peeked(opt: UpdatePeekedOpt) {
-		emit!(Call(relay!(mgr:update_peeked).with_any("opt", opt)));
+	pub fn reveal(target: impl Into<UrlBuf>) {
+		emit!(Call(relay!(mgr:reveal, [target.into()]).with("raw", true).with("no-dummy", true)));
 	}
 
-	pub fn update_spotted(opt: UpdateSpottedOpt) {
-		emit!(Call(relay!(mgr:update_spotted).with_any("opt", opt)));
+	pub fn search_do(opt: SearchOpt) {
+		emit!(Call(relay!(mgr:search_do).with_any("opt", opt)));
 	}
 
-	pub fn update_paged_by(page: usize, only_if: &UrlBuf) {
-		emit!(Call(relay!(mgr:update_paged, [page]).with_any("only-if", only_if.clone())));
+	pub fn tab_rename(tab: Id, name: impl Into<SStr>) {
+		emit!(Call(relay!(mgr:tab_rename, [name.into()]).with("tab", tab)));
+	}
+
+	pub fn update_spotted(lock: SpotLock) {
+		emit!(Call(relay!(mgr:update_spotted).with_any("lock", lock)));
 	}
 }

@@ -1,9 +1,10 @@
-use std::{ffi::OsStr, fmt::Display, ops::Range, path::Path};
+use std::{fmt::Display, ops::Range, path::Path};
 
 use anyhow::Result;
 use regex::bytes::{Regex, RegexBuilder};
-use yazi_shared::event::Cmd;
-use yazi_shared::url::UrlBuf;
+use yazi_shared::{event::Action, strand::AsStrand, url::{UrlBuf, UrlLike}};
+
+use super::Normalizer;
 
 #[derive(Clone)]
 enum Match {
@@ -22,13 +23,14 @@ pub struct Filter {
 
 impl Filter {
 	pub fn new(s: &str, case: FilterCase) -> Result<Self> {
+		let pat = Normalizer::normalize(s)?;
 		let regex = match case {
 			FilterCase::Smart => {
-				let uppercase = s.chars().any(|c| c.is_uppercase());
-				RegexBuilder::new(s).case_insensitive(!uppercase).build()?
+				let uppercase = pat.chars().any(|c| c.is_uppercase());
+				RegexBuilder::new(&pat).case_insensitive(!uppercase).build()?
 			}
-			FilterCase::Sensitive => Regex::new(s)?,
-			FilterCase::Insensitive => RegexBuilder::new(s).case_insensitive(true).build()?,
+			FilterCase::Sensitive => Regex::new(&pat)?,
+			FilterCase::Insensitive => RegexBuilder::new(&pat).case_insensitive(true).build()?,
 		};
         Ok(Self { raw: s.to_owned(), matcher: Match::NameRegex { regex }, deep: false, levels: None, root: None })
     }
@@ -68,68 +70,83 @@ impl Filter {
     }
 
 	#[inline]
-    pub fn matches(&self, name: impl AsRef<OsStr>) -> bool {
-        match &self.matcher {
-            Match::NameRegex { regex } => regex.is_match(name.as_ref().as_encoded_bytes()),
-            Match::Tags { .. } => false,
-        }
-    }
+	#[allow(private_bounds)]
+	pub fn matches<T>(&self, name: T) -> bool
+	where
+		T: AsStrand,
+	{
+		match &self.matcher {
+			Match::NameRegex { regex } => regex.is_match(name.as_strand().encoded_bytes()),
+			Match::Tags { .. } => false,
+		}
+	}
 
-    pub fn matches_entry(&self, name: impl AsRef<OsStr>, path: Option<&Path>) -> bool {
-        match &self.matcher {
-            Match::NameRegex { regex } => regex.is_match(name.as_ref().as_encoded_bytes()),
-            Match::Tags { tags, all } => {
-                // Direct entry checks should bypass cache so UI changes to tags
-                // are reflected immediately in filtering results.
-                if let Some(p) = path { has_required_tags_nocache(p, tags, *all) } else { false }
-            }
-        }
-    }
+	#[allow(private_bounds)]
+	pub fn matches_entry<T>(&self, name: T, path: Option<&Path>) -> bool
+	where
+		T: AsStrand,
+	{
+		match &self.matcher {
+			Match::NameRegex { regex } => regex.is_match(name.as_strand().encoded_bytes()),
+			Match::Tags { tags, all } => {
+				// Direct entry checks should bypass cache so UI changes to tags
+				// are reflected immediately in filtering results.
+				if let Some(p) = path { has_required_tags_nocache(p, tags, *all) } else { false }
+			}
+		}
+	}
+
+	#[allow(private_bounds)]
+	pub fn highlighted<T>(&self, name: T) -> Option<Vec<Range<usize>>>
+	where
+		T: AsStrand,
+	{
+		match &self.matcher {
+			Match::NameRegex { regex } => regex.find(name.as_strand().encoded_bytes()).map(|m| vec![m.range()]),
+			Match::Tags { .. } => None,
+		}
+	}
 
 	#[inline]
-    pub fn highlighted(&self, name: impl AsRef<OsStr>) -> Option<Vec<Range<usize>>> {
-        match &self.matcher {
-            Match::NameRegex { regex } => regex.find(name.as_ref().as_encoded_bytes()).map(|m| vec![m.range()]),
-            Match::Tags { .. } => None,
-        }
-    }
+	pub fn is_deep(&self) -> bool { self.deep }
 
-    #[inline]
-    pub fn is_deep(&self) -> bool { self.deep }
+	#[inline]
+	pub fn levels(&self) -> Option<usize> { self.levels }
 
-    #[inline]
-    pub fn levels(&self) -> Option<usize> { self.levels }
+	#[inline]
+	pub fn root(&self) -> Option<&UrlBuf> { self.root.as_ref() }
 
-    #[inline]
-    pub fn root(&self) -> Option<&UrlBuf> { self.root.as_ref() }
-
-    #[inline]
-    pub fn distance_from_root(&self, url: &UrlBuf) -> Option<usize> {
-        let root = self.root.as_ref()?;
-        let Some(root_path) = root.as_path() else { return None };
-        let Some(url_path) = url.as_path() else { return None };
-        let rel = url_path.strip_prefix(root_path).ok()?;
-        // If same directory, distance is 0
-        if rel.as_os_str().is_empty() { return Some(0) }
-        Some(rel.components().count())
-    }
+	#[inline]
+	pub fn distance_from_root(&self, url: &UrlBuf) -> Option<usize> {
+		let root = self.root.as_ref()?;
+		let root_path = root.as_local()?;
+		let url_path = url.as_local()?;
+		let rel = url_path.strip_prefix(root_path).ok()?;
+		// If same directory, distance is 0
+		if rel.as_os_str().is_empty() {
+			return Some(0);
+		}
+		Some(rel.components().count())
+	}
 
 	/// Check if a directory contains any matching files (recursively)
 	/// Returns true if any file in the directory tree matches the filter
-    pub fn dir_contains_match(&self, dir: &Path) -> bool {
-        // "levels" means how many descendant levels to include relative to `dir`:
-        // 0 = no recursion; 1 = include children; 2 = include grandchildren; etc.
-        // Default fallback is 2 (children + grandchildren).
-        let max_depth = self.levels.unwrap_or(2);
-        if max_depth == 0 { return false; }
+	pub fn dir_contains_match(&self, dir: &Path) -> bool {
+		// "levels" means how many descendant levels to include relative to `dir`:
+		// 0 = no recursion; 1 = include children; 2 = include grandchildren; etc.
+		// Default fallback is 2 (children + grandchildren).
+		let max_depth = self.levels.unwrap_or(2);
+		if max_depth == 0 {
+			return false;
+		}
 
-        match &self.matcher {
-            Match::NameRegex { .. } => self.dir_contains_match_impl(dir, 0, max_depth),
-            Match::Tags { tags, all } => self.dir_contains_match_impl_tags(dir, 0, max_depth, tags, *all),
-        }
-    }
+		match &self.matcher {
+			Match::NameRegex { .. } => self.dir_contains_match_impl(dir, 0, max_depth),
+			Match::Tags { tags, all } => self.dir_contains_match_impl_tags(dir, 0, max_depth, tags, *all),
+		}
+	}
 
-    fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
+	fn dir_contains_match_impl(&self, dir: &Path, depth: usize, max_depth: usize) -> bool {
 		let Ok(entries) = std::fs::read_dir(dir) else {
 			return false;
 		};
@@ -148,48 +165,44 @@ impl Filter {
 			}
 
 			// Recursively check subdirectories up to max_depth levels
-			if ft.is_dir() && depth + 1 < max_depth {
-				if self.dir_contains_match_impl(&entry.path(), depth + 1, max_depth) {
-					return true;
-				}
+			if ft.is_dir() && depth + 1 < max_depth && self.dir_contains_match_impl(&entry.path(), depth + 1, max_depth) {
+				return true;
 			}
 		}
 
 		false
-    }
+	}
 
-    fn dir_contains_match_impl_tags(
-        &self,
-        dir: &Path,
-        depth: usize,
-        max_depth: usize,
-        required: &[String],
-        all: bool,
-    ) -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else { return false };
-        for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
+	fn dir_contains_match_impl_tags(
+		&self,
+		dir: &Path,
+		depth: usize,
+		max_depth: usize,
+		required: &[String],
+		all: bool,
+	) -> bool {
+		let Ok(entries) = std::fs::read_dir(dir) else { return false };
+		for entry in entries.flatten() {
+			let Ok(ft) = entry.file_type() else { continue };
 
-            // Files at this level count if within depth budget
-            if depth + 1 <= max_depth && !ft.is_dir() {
-                if has_required_tags_nocache(&entry.path(), required, all) {
-                    return true;
-                }
-            }
+			// Files at this level count if within depth budget
+			if depth + 1 <= max_depth && !ft.is_dir() && has_required_tags_nocache(&entry.path(), required, all) {
+				return true;
+			}
 
-            // Subdirectories: recurse if within budget
-            if ft.is_dir() && depth + 1 < max_depth {
-                // A tagged subdirectory also satisfies containment
-                if has_required_tags_nocache(&entry.path(), required, all) {
-                    return true;
-                }
-                if self.dir_contains_match_impl_tags(&entry.path(), depth + 1, max_depth, required, all) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
+			// Subdirectories: recurse if within budget
+			if ft.is_dir() && depth + 1 < max_depth {
+				// A tagged subdirectory also satisfies containment
+				if has_required_tags_nocache(&entry.path(), required, all) {
+					return true;
+				}
+				if self.dir_contains_match_impl_tags(&entry.path(), depth + 1, max_depth, required, all) {
+					return true;
+				}
+			}
+		}
+		false
+	}
 }
 
 impl PartialEq for Filter {
@@ -202,6 +215,7 @@ impl Display for Filter {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.raw) }
 }
 
+// --- FilterCase
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FilterCase {
 	Smart,
@@ -210,9 +224,9 @@ pub enum FilterCase {
 	Insensitive,
 }
 
-impl From<&Cmd> for FilterCase {
-	fn from(c: &Cmd) -> Self {
-		match (c.bool("smart"), c.bool("insensitive")) {
+impl From<&Action> for FilterCase {
+	fn from(a: &Action) -> Self {
+		match (a.bool("smart"), a.bool("insensitive")) {
 			(true, _) => Self::Smart,
 			(_, false) => Self::Sensitive,
 			(_, true) => Self::Insensitive,

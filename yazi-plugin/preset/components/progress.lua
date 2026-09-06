@@ -29,9 +29,9 @@ function Progress:redraw()
 
 	local gauge = ui.Gauge():area(self._area)
 	if summary.failed == 0 then
-		gauge = gauge:gauge_style(th.status.progress_normal)
+		gauge:gauge_style(th.status.progress_normal)
 	else
-		gauge = gauge:gauge_style(th.status.progress_error)
+		gauge:gauge_style(th.status.progress_error)
 	end
 
 	local label, percent = "", summary.percent
@@ -42,5 +42,8 @@ function Progress:redraw()
 	end
 
 	label = label .. string.format("%d left", summary.total - summary.success)
-	return gauge:percent(percent):label(ui.Span(label):style(th.status.progress_label))
+	return {
+		ui.Clear(self._area),
+		gauge:percent(percent):label(ui.Span(label):style(th.status.progress_label)),
+	}
 end

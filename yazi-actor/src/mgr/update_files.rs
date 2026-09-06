@@ -1,46 +1,68 @@
+use std::iter;
+
 use anyhow::Result;
-use yazi_core::tab::Folder;
+use yazi_core::{Invalidator, Reconciler};
 use yazi_fs::FilesOp;
 use yazi_macro::{act, render, succ};
-use yazi_parser::mgr::UpdateFilesOpt;
-use yazi_shared::event::Data;
-use yazi_watcher::LINKED;
+use yazi_parser::{mgr::UpdateFilesForm, spark::SparkKind};
+use yazi_shared::{Source, data::Data, url::UrlLike};
+use yazi_watcher::local::LINKED;
 
 use crate::{Actor, Ctx};
 
 pub struct UpdateFiles;
 
 impl Actor for UpdateFiles {
-	type Options = UpdateFilesOpt;
+	type Form = UpdateFilesForm;
 
 	const NAME: &str = "update_files";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		let revision = cx.current().files.revision;
-		let linked: Vec<_> = LINKED.read().from_dir(opt.op.cwd()).map(|u| opt.op.chdir(u)).collect();
-		for op in [opt.op].into_iter().chain(linked) {
-			cx.mgr.yanked.apply_op(&op);
-			Self::update_tab(cx, op).ok();
-		}
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
+		let linked: Vec<_> = LINKED.read().from_dir(form.op.cwd()).map(|u| form.op.chdir(u)).collect();
+		let ops: Vec<_> = iter::once(form.op).chain(linked).collect();
 
+		for op in &ops {
+			Invalidator::new(&mut cx.mgr).apply(op);
+			Reconciler::new(cx.tab, &mut cx.mgr).apply(op);
+		}
 		render!(cx.mgr.yanked.catchup_revision(false));
-		act!(mgr:hidden, cx)?;
-		act!(mgr:sort, cx)?;
 
-		if revision != cx.current().files.revision {
-			act!(mgr:hover, cx)?;
-			act!(mgr:peek, cx)?;
-			act!(mgr:watch, cx)?;
-			act!(mgr:update_paged, cx)?;
+		let tabs = cx.tabs().indices_or_active(form.tabs);
+		let Some((&last, tabs)) = tabs.split_last() else { succ!() };
+
+		for &tab in tabs {
+			cx.with(tab, |cx| Self::update_tab(cx, ops.iter().cloned()))?;
 		}
-		succ!();
+		cx.with(last, |cx| Self::update_tab(cx, ops))
+	}
+
+	fn hook(cx: &Ctx, _: &Self::Form) -> Option<SparkKind> {
+		(cx.source() == Source::Relay).then_some(SparkKind::RelayUpdateFiles)
 	}
 }
 
 impl UpdateFiles {
-	fn update_tab(cx: &mut Ctx, op: FilesOp) -> Result<Data> {
+	fn update_tab(cx: &mut Ctx, ops: impl IntoIterator<Item = FilesOp>) -> Result<Data> {
+		let revision = cx.current().entries.revision;
+
+		for op in ops {
+			Self::update_pane(cx, op).ok();
+		}
+
+		act!(mgr:hidden, cx).ok();
+		act!(mgr:sort, cx).ok();
+
+		if revision != cx.current().entries.revision {
+			act!(mgr:hover, cx)?;
+			act!(mgr:peek, cx)?;
+			act!(mgr:watch, cx).ok();
+			act!(mgr:update_paged, cx)?;
+		}
+		succ!();
+	}
+
+	fn update_pane(cx: &mut Ctx, op: FilesOp) -> Result<Data> {
 		let url = op.cwd();
-		cx.tab_mut().selected.apply_op(&op);
 
 		if url == cx.cwd() {
 			Self::update_current(cx, op)
@@ -56,12 +78,12 @@ impl UpdateFiles {
 	fn update_parent(cx: &mut Ctx, op: FilesOp) -> Result<Data> {
 		let tab = cx.tab_mut();
 
-		let urn = tab.current.url.urn();
-		let leave = matches!(op, FilesOp::Deleting(_, ref urns) if urns.contains(urn));
+		let key = tab.current.url.key();
+		let leave = matches!(op, FilesOp::Deleting(_, ref keys) if keys.contains(&key));
 
 		if let Some(f) = tab.parent.as_mut() {
 			render!(f.update_pub(tab.id, op));
-			render!(f.hover(urn));
+			render!(f.hover(key));
 		}
 
 		if leave {
@@ -79,7 +101,7 @@ impl UpdateFiles {
 		}
 
 		if calc {
-			cx.tasks.prework_sorted(&cx.current().files);
+			cx.tasks.prework_sorted(&cx.current().entries);
 		}
 		succ!();
 	}
@@ -90,21 +112,16 @@ impl UpdateFiles {
 		// Gather deep-filter before mutably borrowing `cx` for the folder entry.
 		let deep_filter = cx
 			.current()
-			.files
+			.entries
 			.filter()
 			.cloned()
 			.filter(|f| f.is_deep());
 
-		let (_, folder) = cx
-			.tab_mut()
-			.history
-			.raw_entry_mut()
-			.from_key(url)
-			.or_insert_with(|| (url.clone(), Folder::from(url)));
+		let (folder, _) = cx.tab_mut().history.ensure(url);
 
 		// Propagate active deep filter to the hovered folder (preview)
 		// so its file list respects deep-filter semantics in the preview pane.
-		folder.files.set_filter(deep_filter);
+		folder.entries.set_filter(deep_filter);
 
 		if folder.update_pub(id, op) {
 			act!(mgr:peek, cx, true)?;
@@ -113,22 +130,22 @@ impl UpdateFiles {
 	}
 
 	fn update_history(cx: &mut Ctx, op: FilesOp) -> Result<Data> {
-		let tab = &mut cx.tab_mut();
-		let leave = tab.parent.as_ref().and_then(|f| f.url.parent().map(|p| (p, f.url.urn()))).is_some_and(
-			|(p, n)| matches!(op, FilesOp::Deleting(ref parent, ref urns) if *parent == p && urns.contains(n)),
+		let tab = cx.tab_mut();
+		let leave = tab.parent.as_ref().and_then(|f| f.url.pair()).is_some_and(
+			|(t, key)| matches!(&op, FilesOp::Deleting(trail, keys) if trail == t && keys.contains(&key)),
 		);
 
-		tab
-			.history
-			.raw_entry_mut()
-			.from_key(op.cwd())
-			.or_insert_with(|| (op.cwd().clone(), Folder::from(op.cwd())))
-			.1
-			.update_pub(tab.id, op);
+		let (folder, evicted) = tab.history.ensure(op.cwd());
+		folder.update_pub(tab.id, op);
+
+		if let Some(evicted) = evicted.filter(|f| tab.hovered_url() == Some(&f.url)) {
+			tab.history.insert(evicted);
+		}
 
 		if leave {
 			act!(mgr:leave, cx)?;
 		}
+
 		succ!();
 	}
 }

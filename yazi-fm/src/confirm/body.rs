@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::{Margin, Rect}, style::Styled, widgets::{Block, Borders, Widget}};
+use ratatui_core::{buffer::Buffer, layout::{Margin, Rect}, style::Styled, widgets::Widget};
+use ratatui_widgets::{block::Block, borders::Borders};
 use yazi_config::THEME;
 use yazi_core::Core;
 
@@ -20,7 +21,7 @@ impl Widget for Body<'_> {
 
 		// Border
 		let block = if self.border {
-			Block::new().borders(Borders::BOTTOM).border_style(THEME.confirm.border)
+			Block::new().borders(Borders::BOTTOM).border_style(THEME.confirm.border.get())
 		} else {
 			Block::new()
 		};
@@ -28,9 +29,9 @@ impl Widget for Body<'_> {
 		confirm
 			.body
 			.clone()
-			.alignment(ratatui::layout::Alignment::Center)
+			.alignment(ratatui_core::layout::Alignment::Center)
 			.block(block)
-			.style(THEME.confirm.body.derive(Styled::style(&confirm.body)))
+			.style(THEME.confirm.body.get().derive(Styled::style(&confirm.body)))
 			.render(inner, buf);
 	}
 }

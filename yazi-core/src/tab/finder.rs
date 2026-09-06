@@ -1,13 +1,13 @@
 use anyhow::Result;
 use hashbrown::HashMap;
-use yazi_fs::{Files, Filter, FilterCase};
-use yazi_shared::url::{UrlBuf, Urn, UrnBuf};
+use yazi_fs::{Entries, Filter, FilterCase};
+use yazi_shared::{path::{DynPath, PathBufDyn}, url::UrlBuf};
 
 use crate::tab::Folder;
 
 pub struct Finder {
 	pub filter:  Filter,
-	pub matched: HashMap<UrnBuf, u8>,
+	pub matched: HashMap<PathBufDyn, u8>,
 	lock:        FinderLock,
 }
 
@@ -26,10 +26,10 @@ impl Finder {
 		})
 	}
 
-	pub fn prev(&self, files: &Files, cursor: usize, include: bool) -> Option<isize> {
-		for i in !include as usize..files.len() {
-			let idx = (cursor + files.len() - i) % files.len();
-			if let Some(s) = files[idx].name()
+	pub fn prev(&self, entries: &Entries, cursor: usize, include: bool) -> Option<isize> {
+		for i in !include as usize..entries.len() {
+			let idx = (cursor + entries.len() - i) % entries.len();
+			if let Some(s) = entries[idx].name()
 				&& self.filter.matches(s)
 			{
 				return Some(idx as isize - cursor as isize);
@@ -38,10 +38,10 @@ impl Finder {
 		None
 	}
 
-	pub fn next(&self, files: &Files, cursor: usize, include: bool) -> Option<isize> {
-		for i in !include as usize..files.len() {
-			let idx = (cursor + i) % files.len();
-			if let Some(s) = files[idx].name()
+	pub fn next(&self, entries: &Entries, cursor: usize, include: bool) -> Option<isize> {
+		for i in !include as usize..entries.len() {
+			let idx = (cursor + i) % entries.len();
+			if let Some(s) = entries[idx].name()
 				&& self.filter.matches(s)
 			{
 				return Some(idx as isize - cursor as isize);
@@ -57,12 +57,12 @@ impl Finder {
 		self.matched.clear();
 
 		let mut i = 0u8;
-		for file in folder.files.iter() {
+		for file in folder.entries.iter() {
 			if file.name().is_none_or(|s| !self.filter.matches(s)) {
 				continue;
 			}
 
-			self.matched.insert(file.urn().to_owned(), i);
+			self.matched.insert(file.key().into(), i);
 			if self.matched.len() > 99 {
 				break;
 			}
@@ -76,20 +76,23 @@ impl Finder {
 }
 
 impl Finder {
-	pub fn matched_idx(&self, folder: &Folder, urn: &Urn) -> Option<u8> {
-		if self.lock == *folder { self.matched.get(urn).copied() } else { None }
+	pub fn matched_idx<T>(&self, folder: &Folder, key: T) -> Option<u8>
+	where
+		T: DynPath,
+	{
+		if self.lock == *folder { self.matched.get(&key.dyn_path()).copied() } else { None }
 	}
 }
 
 // --- Lock
 impl From<&Folder> for FinderLock {
 	fn from(value: &Folder) -> Self {
-		Self { cwd: value.url.clone(), revision: value.files.revision }
+		Self { cwd: value.url.clone(), revision: value.entries.revision }
 	}
 }
 
 impl PartialEq<Folder> for FinderLock {
 	fn eq(&self, other: &Folder) -> bool {
-		self.revision == other.files.revision && self.cwd == other.url
+		self.revision == other.entries.revision && self.cwd == other.url
 	}
 }

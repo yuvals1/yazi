@@ -1,9 +1,9 @@
 use anyhow::Result;
-use yazi_core::tab::Tab;
+use yazi_core::{mgr::CdSource, tab::Tab};
 use yazi_macro::{act, render, succ};
-use yazi_parser::mgr::{CdSource, TabCreateOpt};
-use yazi_proxy::AppProxy;
-use yazi_shared::event::Data;
+use yazi_parser::mgr::TabCreateForm;
+use yazi_scheduler::NotifyProxy;
+use yazi_shared::{data::Data, url::UrlLike};
 
 use crate::{Actor, Ctx};
 
@@ -12,27 +12,33 @@ const MAX_TABS: usize = 9;
 pub struct TabCreate;
 
 impl Actor for TabCreate {
-	type Options = TabCreateOpt;
+	type Form = TabCreateForm;
 
 	const NAME: &str = "tab_create";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
 		if cx.tabs().len() >= MAX_TABS {
-			succ!(AppProxy::notify_warn(
+			succ!(NotifyProxy::push_warn(
 				"Too many tabs",
 				"You can only open up to 9 tabs at the same time."
 			));
 		}
 
 		let mut tab = Tab::default();
-		let (cd, url) = if let Some(wd) = opt.wd {
-			(true, wd.into_owned())
+		let (cd, url) = if let Some(target) = form.target {
+			(true, target)
 		} else if let Some(h) = cx.hovered() {
 			tab.pref = cx.tab().pref.clone();
-			(false, h.url.to_regular())
+			(false, h.url.clone())
+		} else if !cx.cwd().is_search() {
+			tab.pref = cx.tab().pref.clone();
+			(true, cx.cwd().clone())
+		} else if let Some(u) = tab.backstack.current().cloned() {
+			tab.pref = cx.tab().pref.clone();
+			(true, u)
 		} else {
 			tab.pref = cx.tab().pref.clone();
-			(true, cx.cwd().to_regular())
+			(true, tab.cwd().to_regular()?)
 		};
 
 		let tabs = &mut cx.mgr.tabs;
@@ -48,6 +54,7 @@ impl Actor for TabCreate {
 
 		act!(mgr:refresh, cx)?;
 		act!(mgr:peek, cx, true)?;
+		act!(app:title, cx).ok();
 		succ!(render!());
 	}
 }

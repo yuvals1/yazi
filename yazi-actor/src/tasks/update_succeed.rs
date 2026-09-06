@@ -1,19 +1,32 @@
 use anyhow::Result;
-use yazi_macro::succ;
-use yazi_parser::tasks::UpdateSucceedOpt;
-use yazi_shared::event::Data;
+use yazi_macro::{act, succ};
+use yazi_parser::tasks::UpdateSucceedForm;
+use yazi_shared::{data::Data, url::UrlLike};
 
 use crate::{Actor, Ctx};
 
 pub struct UpdateSucceed;
 
 impl Actor for UpdateSucceed {
-	type Options = UpdateSucceedOpt;
+	type Form = UpdateSucceedForm;
 
 	const NAME: &str = "update_succeed";
 
-	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
-		cx.mgr.watcher.push_files(opt.urls);
+	fn act(cx: &mut Ctx, form: Self::Form) -> Result<Data> {
+		if form.urls.is_empty() {
+			succ!();
+		}
+
+		if form.track
+			&& form.id == cx.tasks.scheduler.behavior.first_id()
+			&& let Some((trail, key)) = form.urls[0].pair()
+			&& trail == *cx.cwd()
+		{
+			cx.current_mut().trace = Some(key.into());
+			act!(mgr:hover, cx)?;
+		}
+
+		cx.mgr.watcher.report(form.urls);
 		succ!();
 	}
 }
